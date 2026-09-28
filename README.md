@@ -3,11 +3,23 @@
 > Turn **Bilibili / YouTube** videos into study material: a clickable subtitle list, shadowing, word lookup, vocabulary notebook, spaced-repetition review, and an offline dictionary.
 > All data stays in your browser (`chrome.storage.local`) — **no login, no account, nothing uploaded**.
 
-**Version v1.0.0** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
+**Version v1.0.1** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
+
+[![Get LingoReel for Chrome](https://img.shields.io/badge/Chrome_Web_Store-Download-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/lingoreel/jghdcidakakmfacgnpmiepeplfgljbmc)
+[![Get LingoReel for Edge](https://img.shields.io/badge/Microsoft_Edge-Download-0078D4?logo=microsoftedge&logoColor=white)](https://microsoftedge.microsoft.com/addons/detail/lingoreel/jfdkckgipihhiebhcgembhpmdoeediio)
 
 [**English**](#-english) · [**中文**](#-中文)
 
 ---
+
+## Get LingoReel
+
+Install LingoReel from your browser's extension store:
+
+- **Chrome Web Store**: <https://chromewebstore.google.com/detail/lingoreel/jghdcidakakmfacgnpmiepeplfgljbmc>
+- **Microsoft Edge Add-ons**: <https://microsoftedge.microsoft.com/addons/detail/lingoreel/jfdkckgipihhiebhcgembhpmdoeediio>
+
+You can also load it unpacked from source — see [Install](#install-load-unpacked-no-build-step) below.
 
 # 🇬🇧 English
 
@@ -296,7 +308,7 @@ Released under the [MIT License](LICENSE).
 - **免费翻译接口有额度**：Google 端点随时可能限流（429），MyMemory 匿名额度约每日数千字符；长视频可能只翻译出一部分，隔一会再点「译中文」可继续。译文是机器翻译，别当标准答案。
 - **超长视频只译前 1500 行**：再长会让免费接口直接限流到全线失败，宁可先给前半段。
 - **自定义大模型域名要授权一次**：DeepSeek / 硅基流动 / 智谱 / Kimi / 通义 / 火山 / OpenAI / Groq 已内置在 `host_permissions` 里，**直接用不用授权**；填了列表外的中转站域名时，点「测试连接」会弹一次授权请求，允许后后台才能发出去（否则连错误都看不到，会被内核直接拦掉）。
-- **扩展是自签的本地加载版**：没有上架商店，每次更新要到扩展管理页走「开发者模式 → 加载已解压的扩展程序 / 刷新」。
+- **扩展已上架 Chrome 与 Edge 商店**：可直接在商店搜索「LingoReel」一键安装；仍支持本地加载（扩展管理页 → 开发者模式 → 加载已解压的扩展程序）。
 - **极少数网站全屏对象是 `<video>` 自己**：这种情况下任何 DOM 都画不上去（`<video>` 的子元素一律不渲染），扩展会尝试把全屏对象换成上层容器；若浏览器以「无用户手势」为由拒绝，就维持现状——浮窗不会显示，但你的全屏不会被打断。B 站 / YouTube 全屏的都是播放器容器，不受影响。
 
 ## 目录结构
