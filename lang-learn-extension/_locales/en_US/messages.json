@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "LingoReel"
+  },
+  "extensionDescription": {
+    "message": "Learn languages from Bilibili & YouTube videos: shadowing with scoring, word lookup, vocabulary review, AI subtitle translation."
+  },
+  "defaultTitle": {
+    "message": "LingoReel - video language shadowing assistant"
+  }
+}

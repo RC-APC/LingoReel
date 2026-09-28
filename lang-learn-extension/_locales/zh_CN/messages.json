@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "LingoReel"
+  },
+  "extensionDescription": {
+    "message": "在 B 站 / YouTube 看外语视频：字幕逐句跟读录音评分、点词查词、双击存生词按记忆曲线复习、大模型翻译边翻边上屏。数据全本地。"
+  },
+  "defaultTitle": {
+    "message": "LingoReel · 视频外语跟读助手"
+  }
+}
