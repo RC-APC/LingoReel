@@ -509,3 +509,61 @@
 #ll-popup .ll-def-ex { color: #ffec99; margin-top: 4px; font-size: 12px; line-height: 1.4; font-style: italic; }
 #ll-popup .ll-pop-tip { margin-top: 8px; color: #99a0aa; font-size: 11px; }
 #ll-popup .ll-pop-def { color: #ffd8a8; }
+
+/* ===== B 站搜索 / 列表页：CC 字幕识别面板与角标 ===== */
+#ll-cc-panel {
+  position: fixed; left: 12px; top: 72px; z-index: 99999;
+  width: 300px; max-height: 80vh; display: flex; flex-direction: column;
+  background: rgba(20, 18, 40, 0.92); color: #fff; border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); overflow: hidden;
+  font: 13px/1.45 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  backdrop-filter: blur(6px);
+}
+#ll-cc-panel.ll-cc-collapsed { max-height: 42px; }
+#ll-cc-panel .ll-cc-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: linear-gradient(135deg, #5B8DEF, #7C5CFF);
+}
+#ll-cc-panel .ll-cc-title { font-weight: 600; flex: 1; }
+#ll-cc-panel .ll-cc-count {
+  background: rgba(255, 255, 255, 0.22); border-radius: 10px; padding: 1px 8px; font-size: 12px;
+}
+#ll-cc-panel .ll-cc-min {
+  border: 0; background: rgba(255, 255, 255, 0.2); color: #fff; border-radius: 6px;
+  width: 22px; height: 22px; cursor: pointer; font-size: 14px; line-height: 1;
+}
+#ll-cc-panel .ll-cc-list { overflow-y: auto; padding: 6px; }
+#ll-cc-panel .ll-cc-progbar {
+  display: flex; align-items: center; gap: 8px; padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.22); font-size: 11px; color: #c9c6e6;
+}
+#ll-cc-panel .ll-cc-prog { flex: 1; }
+#ll-cc-panel .ll-cc-rescan {
+  border: 0; background: rgba(255, 255, 255, 0.18); color: #fff; border-radius: 6px;
+  padding: 2px 8px; cursor: pointer; font-size: 11px; line-height: 1.4;
+}
+#ll-cc-panel .ll-cc-rescan:hover { background: rgba(255, 255, 255, 0.3); }
+#ll-cc-panel.ll-cc-empty .ll-cc-list::after {
+  content: "本页暂未检测到带 CC 字幕的视频"; display: block; padding: 14px 8px;
+  color: #b9b6d6; text-align: center; font-size: 12px;
+}
+.ll-cc-item {
+  padding: 8px; border-radius: 8px; margin-bottom: 4px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.06);
+}
+.ll-cc-item:hover { background: rgba(124, 92, 255, 0.30); }
+.ll-cc-ititle {
+  font-size: 13px; color: #fff; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px;
+}
+.ll-cc-langs { display: flex; flex-wrap: wrap; gap: 4px; }
+.ll-cc-lang {
+  font-size: 11px; background: rgba(91, 141, 239, 0.35); color: #cfe0ff;
+  border-radius: 6px; padding: 1px 6px;
+}
+.ll-cc-badge {
+  position: absolute; top: 6px; left: 6px; z-index: 6;
+  background: linear-gradient(135deg, #5B8DEF, #7C5CFF); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 1; padding: 3px 6px; border-radius: 6px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); pointer-events: none;
+}

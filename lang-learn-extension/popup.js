@@ -73,9 +73,10 @@ function ensurePermission(baseUrl) {
 }
 
 function loadSettings() {
-  chrome.storage.sync.get(['enabled', 'autoPause', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget', 'panelOpacity', 'textOpacity'], (r) => {
+  chrome.storage.sync.get(['enabled', 'autoPause', 'searchCc', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget', 'panelOpacity', 'textOpacity'], (r) => {
     $('enabled').checked = r.enabled !== false;
     $('autoPause').checked = !!r.autoPause;
+    $('searchCc').checked = r.searchCc !== false;
     $('dictSource').value = r.dictSource || 'api';
     $('eudicAction').value = r.eudicAction || 'lp-dict';
     $('autoTranslate').checked = r.autoTranslate !== false;
@@ -105,6 +106,7 @@ function saveSettings() {
   chrome.storage.sync.set({
     enabled: $('enabled').checked,
     autoPause: $('autoPause').checked,
+    searchCc: $('searchCc').checked,
     dictSource: $('dictSource').value,
     eudicAction: $('eudicAction').value,
     autoTranslate: $('autoTranslate').checked,
@@ -183,7 +185,7 @@ function renderVocab() {
 document.addEventListener('DOMContentLoaded', () => {
   loadSettings();
   renderVocab();
-  ['enabled', 'autoPause', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget',
+  ['enabled', 'autoPause', 'searchCc', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget',
     'llmOn', 'llmPreset', 'llmBase', 'llmModel', 'llmKey'].forEach((id) => {
     $(id).addEventListener('change', saveSettings);
     $(id).addEventListener('input', saveSettings);

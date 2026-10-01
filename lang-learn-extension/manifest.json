@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extensionName__",
-  "version": "1.0.1",
+  "version": "1.0.6",
   "default_locale": "en_US",
   "description": "__MSG_extensionDescription__",
   "permissions": ["storage", "unlimitedStorage"],
@@ -35,6 +35,8 @@
         "https://www.bilibili.com/video/*",
         "https://www.bilibili.com/bangumi/*",
         "https://www.bilibili.com/*",
+        "https://search.bilibili.com/*",
+        "https://space.bilibili.com/*",
         "https://player.bilibili.com/*",
         "https://m.bilibili.com/*",
         "https://www.youtube.com/*",

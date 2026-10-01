@@ -2,7 +2,7 @@
   'use strict';
 
   let panel = null;
-  let settings = { enabled: true, autoPause: false, dictSource: 'api', eudicAction: 'lp-dict' };
+  let settings = { enabled: true, autoPause: false, dictSource: 'api', eudicAction: 'lp-dict', searchCcEnabled: true };
   let observedEl = null;
   let observer = null;
   let tickTimer = null;
@@ -60,8 +60,8 @@
   let eudicAction = 'lp-dict'; // 唤起欧路词典的窗口类型：lp-dict 迷你 / cap-dict 取词小窗 / dict 主窗口
   let eudicScheme = 'eudic';   // 词典应用协议：eudic 欧路 / eudic-fr 法语助手 / eudic-de 德语助手 / eudic-es 西语助手
 
-  // ---------- AI 中文译文轨道 ----------
-  // 只有原文 CC、没有中文轨道时，把当前轨道整批翻译成中文，
+  // ---------- AI 译文轨道（目标语言跟随「母语 / 译文语言」） ----------
+  // 只有原文 CC、且没有目标语言轨道时，把当前轨道整批翻译成所选母语，
   // 并往 subtitleTracks 里塞一条「虚拟轨道」（正文不从网络下载，直接取内存里的译文）。
   let autoTranslate = true;    // 自动翻译开关
   let trEngine = 'auto';       // 翻译引擎：auto（大模型→Google→MyMemory 接力）/ llm / google / mymemory
@@ -95,7 +95,7 @@
     return new Promise((resolve) => {
       // 关键：无论回调里发生什么都必须 resolve()，否则 init() 会永久挂起 → 面板不出现。
       try {
-        chrome.storage.sync.get(['enabled', 'autoPause', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget', 'panelOpacity', 'textOpacity', 'liveShadow'], (r) => {
+        chrome.storage.sync.get(['enabled', 'autoPause', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget', 'panelOpacity', 'textOpacity', 'liveShadow', 'searchCcEnabled'], (r) => {
           try {
             settings.enabled = r.enabled !== false;
             settings.autoPause = !!r.autoPause;
@@ -110,6 +110,7 @@
             panelOpacity = (typeof r.panelOpacity === 'number' && r.panelOpacity > 0) ? r.panelOpacity : 0.85;
             textOpacity = (typeof r.textOpacity === 'number' && r.textOpacity >= 0) ? r.textOpacity : 1;
             liveShadowTools = r.liveShadow !== false;
+            settings.searchCcEnabled = r.searchCcEnabled !== false;
           } catch (e) { log('应用设置出错（用默认值继续）', e); }
           resolve();
         });
@@ -132,7 +133,7 @@
       trackLabel: '字幕轨道', trackLoading: '加载中…', trackNone: '（无可选 CC 轨道）',
       track2Title: '对照轨道（双语同时显示，窗口化浮窗里叠两行）', track2None: '对照：无',
       reloadTitle: '重新获取字幕列表',
-      trTitle: '把当前字幕轨道翻译成中文，生成一条新的「中文（AI 翻译）」轨道', trBtn: '译中文',
+      trTitle: '把当前字幕轨道翻译成所选母语，生成一条新的「母语（AI 翻译）」轨道', trBtn: '译母语',
       hint: '点 ▶ 跟读该行 · 点 🎤 录音打分 · 点单词查释义 · 双击单词存生词',
       vocabHead: '共 {n} 词 · 待复习 {d}', vocabEmpty: '还没有保存单词。在字幕里双击单词即可加入。',
       dictLoading: '查询中…', dictNotFound: '未找到释义。内置词库主要收录英文；其它语种请在设置中配置「整句翻译」。',
@@ -337,7 +338,8 @@
   // 取 cid。⚠️ 分 P 陷阱：view 接口的 data.cid 是【第一 P】的 cid，
   // 多 P 视频在 P2 播放时若用它，会拉到 P1 的字幕甚至拉不到 → 必须按 page 取 pages[page-1].cid。
   async function resolveCid(bv, page) {
-    const r = await fetch('https://api.bilibili.com/x/web-interface/view?bvid=' + bv, { credentials: 'include' });
+    // 走带签名的 wbi/view（老 view 端点会被 412 风控返回 HTML）
+    const r = await fetchViewSigned(bv);
     const j = await r.json();
     const d = j.data || {};
     if (page && page > 1 && Array.isArray(d.pages) && d.pages[page - 1] && d.pages[page - 1].cid) {
@@ -536,7 +538,7 @@
         <select id="ll-track"><option value="-1">${t('trackLoading')}</option></select>
         <select id="ll-track2" title="${t('track2Title')}"><option value="-1">${t('track2None')}</option></select>
         <button id="ll-reload" class="ll-btn" title="${t('reloadTitle')}">⟳</button>
-        <button id="ll-tr" class="ll-btn" title="${t('trTitle')}">${t('trBtn')}</button>
+        <button id="ll-tr" class="ll-btn" title="把当前字幕轨道翻译成所选母语，生成一条 AI 翻译轨道">翻译</button>
       </div>
       <div id="ll-vocab" style="display:none;"></div>
       <div id="ll-review" style="display:none;"></div>
@@ -1986,12 +1988,20 @@
   }
 
   // ---------- AI 中文译文轨道 ----------
-  // 触发时机：主轨道加载完成、且确实「没有中文轨道」时自动跑；也可点面板上的「译中文」手动跑。
-  // 产物：往 subtitleTracks 追加一条 _virtual 轨道 → 下拉里多出「中文（AI 翻译）」，
-  // 既可当主轨道（列表全中文），也可当对照轨道（窗口化浮窗里原文下方叠一行中文）。
+  // 触发时机：主轨道加载完成、且确实「没有目标语言轨道」时自动跑；也可点面板上的「译 + 母语」手动跑。
+  // 产物：往 subtitleTracks 追加一条 _virtual 轨道 → 下拉里多出「母语（AI 翻译）」，
+  // 既可当主轨道（列表全是译文），也可当对照轨道（窗口化浮窗里原文下方叠一行译文）。
 
   function isChineseTrack(t) {
     return /ch|zh|cn|中文|简体|繁体/i.test(String((t && (t.lan + ' ' + t.lan_doc)) || ''));
+  }
+  // 判断某轨道是否已处于「目标语言」：用于翻译跳过判定（替代写死的 isChineseTrack）。
+  // 这样选 English 作母语时，中文源轨道会被正常翻译成 English，而非被「已经是中文」误拦。
+  function trackInTargetLang(t, tl) {
+    if (!t) return false;
+    if (t.lan === tl) return true;
+    if (tl === 'zh-CN' && isChineseTrack(t)) return true;
+    return false;
   }
   // 自动选主轨道时排除虚拟轨道（译文轨道不该被当成"原文"选中）
   function pickMainTrack() {
@@ -2023,6 +2033,16 @@
     }
     return lan || '';
   }
+  // 译文轨道的展示名：跟随「母语 / 译文语言」translateTarget（原先写死中文，已改为跟随选择）
+  function langDocName(code) {
+    const m = {
+      'zh-CN': '中文', 'zh-TW': '繁體中文', 'en': 'English', 'ja': '日本語', 'ko': '한국어',
+      'fr': 'Français', 'de': 'Deutsch', 'es': 'Español', 'ru': 'Русский', 'pt': 'Português',
+      'it': 'Italiano', 'th': 'ไทย', 'vi': 'Tiếng Việt', 'ar': 'العربية', 'id': 'Indonesia', 'hi': 'हिन्दी'
+    };
+    return m[code] || code || '中文';
+  }
+
   function engineLabel() {
     if (trEngine === 'llm') return '大模型 API';
     if (trEngine === 'google') return 'Google 免费翻译';
@@ -2059,22 +2079,28 @@
   function setTrButton(running) {
     const b = document.getElementById('ll-tr');
     if (!b) return;
-    b.textContent = running ? '停止' : '译中文';
-    b.title = running ? '停止本次翻译' : '把当前字幕轨道翻译成中文，生成一条新的「中文（AI 翻译）」轨道';
+    const doc = langDocName(translateTarget);
+    b.textContent = running ? '停止' : '翻译';
+    b.title = running ? '停止本次翻译' : '把当前字幕轨道翻译成所选母语，生成一条 AI 翻译轨道';
     b.classList.toggle('ll-tr-on', !!running);
   }
 
   function ensureVirtualTrack(srcIdx) {
+    const doc = langDocName(translateTarget) + '（AI 翻译）';
     let i = subtitleTracks.findIndex((t) => t._virtual && t._src === srcIdx);
     if (i < 0) {
       subtitleTracks.push({
-        lan: 'zh-CN',
-        lan_doc: '中文（AI 翻译）',
+        lan: translateTarget,
+        lan_doc: doc,
         url: 'll-translate://' + srcIdx,
         _virtual: true,
         _src: srcIdx
       });
       i = subtitleTracks.length - 1;
+    } else {
+      // 复用已存在的虚拟轨道时，按当前目标语言刷新标签（避免切换母语后旧语言标签残留）
+      subtitleTracks[i].lan = translateTarget;
+      subtitleTracks[i].lan_doc = doc;
     }
     return i;
   }
@@ -2142,11 +2168,11 @@
     const n = await commitTranslation(srcIdx, key, texts, true);
     if (!n) {
       lastTrInfo = { ok: false, error: '翻译结果为空' };
-      setStatus('翻译完成但结果为空（可能接口被限流）。可稍后点「译中文」重试，或在插件设置里换引擎。');
+      setStatus('翻译完成但结果为空（可能接口被限流）。可稍后点面板上的「译 ' + langDocName(translateTarget) + '」重试，或在插件设置里换引擎。');
       return;
     }
     lastTrInfo = { ok: true, engine: engine, lines: n };
-    setStatus('已生成「中文（AI 翻译）」轨道（' + n + ' 行 / ' + engine + '）。已自动设为对照轨道：窗口化浮窗里原文下方叠中文；也可在主轨道下拉里选它只看中文。');
+    setStatus('已生成「' + langDocName(translateTarget) + '（AI 翻译）」轨道（' + n + ' 行 / ' + engine + '）。已自动设为对照轨道：窗口化浮窗里原文下方叠' + langDocName(translateTarget) + '；也可在主轨道下拉里选它只看译文。');
   }
 
   async function startTranslation(srcIdx, opts) {
@@ -2154,13 +2180,13 @@
     if (trRunning) return;
     if (srcIdx == null || srcIdx < 0 || !cues.length) { showToast('当前没有可翻译的字幕'); return; }
     const track = subtitleTracks[srcIdx];
-    if (!opts.force && track && (track._virtual || isChineseTrack(track))) {
-      showToast('当前轨道已经是中文，无需翻译');
+    if (!opts.force && track && (track._virtual || trackInTargetLang(track, translateTarget))) {
+      showToast('当前字幕已是所选母语，无需再翻译');
       return;
     }
     const src = cues.map((c) => c.text);
     const srcCues = cues.slice();      // 源轨道快照：翻译全程都拿它当时间轴基准
-    // 缓存键带上引擎：换引擎（免费机翻 ↔ 大模型）后，重点「译中文」才会重新翻译
+    // 缓存键带上引擎：换引擎（免费机翻 ↔ 大模型）后，重点「译 X」才会重新翻译
     const key = currentVideoKey() + '|' + (track ? (track.lan || '') : '') + '|' + translateTarget + '|' + trEngine + '|' + md5hex(src.join('\n'));
     const cached = await getTrCache(key);
     if (cached && cached.texts && cached.texts.length === src.length && cached.tl === translateTarget) {
@@ -2183,7 +2209,7 @@
     const notes = [];
     trProgress = { done: 0, total: work.length, ready: 0, engine: realEngine };
     const plan = planTrBatches(work.length);
-    setStatus('正在翻译成中文… 0/' + work.length + ' 行（' + realEngine + '）译文会边翻边上屏，不用等全部完成。');
+    setStatus('正在翻译… 0/' + work.length + ' 行（' + realEngine + '）译文会边翻边上屏，不用等全部完成。');
     for (let bi = 0; bi < plan.length; bi++) {
       if (trAbort || gen !== trGen) break;
       const slice = work.slice(plan[bi].start, plan[bi].end);
@@ -2211,7 +2237,7 @@
         const n = await commitTranslation(srcIdx, key, out, !attached, srcCues);
         if (n) { attached = true; trProgress.ready = n; }
       }
-      setStatus('正在翻译成中文… ' + done + '/' + work.length + ' 行 · 已上屏 ' + trProgress.ready + ' 行（' + realEngine + '）不用等全部译完。');
+      setStatus('正在翻译… ' + done + '/' + work.length + ' 行 · 已上屏 ' + trProgress.ready + ' 行（' + realEngine + '）不用等全部译完。');
       await new Promise((r) => setTimeout(r, 150));  // 免费接口，别打太猛
     }
     trRunning = false; trAbort = false;
@@ -2224,12 +2250,12 @@
       let hint = '（详细原因见下方；可点「诊断」查看上次错误）';
       if (/401|403/.test(fatal)) hint = '（API Key 不对或没权限，去平台检查一下）';
       else if (/404/.test(fatal)) hint = '（404：API 地址或模型名填错了，去平台复制最新的模型名）';
-      else if (/HTTP 429|额度|quota|限流/i.test(fatal)) hint = '（限流 / 额度用尽，过一会再点「译中文」即可）';
+      else if (/HTTP 429|额度|quota|限流/i.test(fatal)) hint = '（限流 / 额度用尽，过一会再点按钮重试即可）';
       else if (/Failed to fetch|NetworkError|ERR_/i.test(fatal)) hint = '（连不上：检查网络、代理，或该域名是否已授权）';
       setStatus('翻译失败：' + fatal + hint);
       return;
     }
-    if (!hitCount) { setStatus('翻译未返回任何结果。可点「译中文」重试。'); return; }
+    if (!hitCount) { setStatus('翻译未返回任何结果。可点按钮重试。'); return; }
     // 只在"基本翻全"时才写缓存：半截结果一旦被缓存，下次会直接命中这半截、永远补不齐
     if (!trAbort && hitCount >= work.length * 0.98) putTrCache(key, translateTarget, out);
     const n = await commitTranslation(srcIdx, key, out, !attached, srcCues);
@@ -2237,10 +2263,10 @@
     const engLabel = (fatal ? realEngine + '（部分失败）' : realEngine) + tail;
     trProgress.ready = n; trProgress.engine = engLabel;
     lastTrInfo = { ok: !fatal, engine: engLabel, lines: hitCount, error: fatal || null };
-    setStatus('已生成「中文（AI 翻译）」轨道（已上屏 ' + n + ' 行' +
+    setStatus('已生成「' + langDocName(translateTarget) + '（AI 翻译）」轨道（已上屏 ' + n + ' 行' +
       (fatal ? '／部分失败：' + fatal : '') + ' / ' + engLabel + '）' +
       (trAbort ? '（已按「停止」保留翻好的部分）' : '') +
-      '。已自动设为对照轨道：窗口化浮窗里原文下方叠中文；也可在主轨道下拉里选它只看中文。');
+      '。已自动设为对照轨道：窗口化浮窗里原文下方叠' + langDocName(translateTarget) + '；也可在主轨道下拉里选它只看译文。');
   }
 
   // 自动翻译判定：开了开关 + 不是 DOM 兜底 + 当前轨道非中文 + 确实没有真中文轨道
@@ -2249,9 +2275,10 @@
       if (!autoTranslate || usingDomFallback || trRunning) return;
       if (!cues.length) return;
       const t = subtitleTracks[srcIdx];
-      if (!t || t._virtual || isChineseTrack(t)) return;
-      const realZh = subtitleTracks.findIndex((x) => !x._virtual && isChineseTrack(x));
-      if (realZh >= 0) return;   // 本来就有中文轨道，没必要翻译
+      if (!t || t._virtual || trackInTargetLang(t, translateTarget)) return;
+      // 已经有「目标语言」轨道就跳过（中文母语时等价于「已有中文轨道」，向后兼容）
+      const realTarget = subtitleTracks.findIndex((x) => !x._virtual && (x.lan === translateTarget || (translateTarget === 'zh-CN' && isChineseTrack(x))));
+      if (realTarget >= 0) return;   // 本来就有目标语言轨道，没必要再翻译
       await startTranslation(srcIdx, {});
     } catch (e) { log('自动翻译失败', e); }
   }
@@ -2338,7 +2365,7 @@
       }
       // 译文轨道被选中但正文为空：明确提示，避免"选了没反应"
       if (subtitleTracks[idx] && subtitleTracks[idx]._virtual && !cues.length) {
-        setStatus('该译文轨道暂无内容（翻译还没生成或已失效），点「译中文」可重新生成。');
+        setStatus('该译文轨道暂无内容（翻译还没生成或已失效），点面板上的「译 ' + langDocName(translateTarget) + '」可重新生成。');
       }
       try { maybeAutoTranslate(idx); } catch (e) { /* noop */ }
       if (cues.length) {
@@ -2821,6 +2848,7 @@
       const prevAutoPause = settings.autoPause;
       settings.enabled = r.enabled !== false;
       settings.autoPause = !!r.autoPause;
+      settings.searchCcEnabled = r.searchCcEnabled !== false;
       // 自动暂停开关变化（如从设置页改的）→ 丢掉旧目标，按当前播放位置重新武装
       if (prevAutoPause !== settings.autoPause) { pendingPauseAt = null; pendingPauseCue = null; lastAutoPauseTo = null; }
       settings.dictSource = r.dictSource || 'api';
@@ -2851,7 +2879,7 @@
   }
 
   function syncSettings() {
-    chrome.storage.sync.get(['enabled', 'autoPause', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget', 'panelOpacity', 'textOpacity', 'liveShadow'], (r) => {
+    chrome.storage.sync.get(['enabled', 'autoPause', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget', 'panelOpacity', 'textOpacity', 'liveShadow', 'searchCcEnabled'], (r) => {
       if (chrome.runtime.lastError) return;
       applySettings(r);
     });
@@ -2900,11 +2928,274 @@
     }, 1500);
   }
 
+  // ============ B 站搜索 / 列表页：CC 字幕识别 + 可点击列表 ============
+  // 在 search.bilibili.com / space.bilibili.com 等列表页，逐个查视频卡片的 CC 情况，
+  // 给有 CC 字幕的卡片打角标，并在左侧浮出一个可点击列表，点列表项直接进对应视频。
+  // 依赖 B 站 x/web-interface/wbi/view 接口（带 wbi 签名）返回 data.subtitle.list；老 view 端点已被 412 风控。
+  let ccCache = {};            // bvid -> { hasCc, langs }
+  let ccCheckedMap = {};       // bvid -> true（本页已入队，避免重复查）
+  let ccPanel = null;
+  let ccQueue = [];
+  let ccRunning = 0;
+  let ccLastHref = '';
+  let ccScanned = 0;   // 本页已向 view 接口查询的卡片数
+  let ccTotal = 0;     // 本页发现的卡片总数
+  let ccFail = 0;      // 查询失败（被限流/风控）的卡片数
+  let ccLastReqTs = 0; // 上次发起 view 请求的时间戳（节流用）
+  let ccLastErr = '';  // 最近一次失败的简短原因（透出到面板，便于实机定位）
+  const CC_MAX_CONCURRENCY = 3;
+  const CC_REQ_GAP = 140; // 相邻请求最小间隔(ms)，进一步降低风控概率
+
+  function ccHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  function isListPage(loc) {
+    loc = loc || (typeof location !== 'undefined' ? location : {});
+    const h = (loc.hostname || '').toLowerCase();
+    const p = loc.pathname || '';
+    if (h === 'search.bilibili.com') return true;
+    if (h === 'space.bilibili.com') return /\/(video|channel|upload|dynamic|favlist)/.test(p);
+    if (h === 'www.bilibili.com') {
+      // 排除播放页 /video/ 与番剧播放 /bangumi/play/（这些要挂跟读面板而非扫描器）
+      if (/^\/(video|bangumi\/play)\//.test(p)) return false;
+      // 首页推荐流 www.bilibili.com/（可能带 ?spm= 跟踪参数，不影响 pathname 判断）
+      if (p === '/' || p === '') return true;
+      // 站内的分类/分区/收藏/稍后再看等列表页：www.bilibili.com/c/、/v/、/fav/、/watchlater 等
+      return /\/(c|v|fav|medialist)\//.test(p) || /^\/watchlater(\/|$)/.test(p);
+    }
+    return false;
+  }
+
+  function extractBvid(href) {
+    if (!href) return null;
+    const m = String(href).match(/\/video\/(BV[0-9A-Za-z]+)/) || String(href).match(/[bB][vV](1[0-9A-Za-z]{9})/);
+    if (!m) return null;
+    // ⚠️ BV 号大小写敏感（B 站实测：全大写会被 view 接口判 -404），必须保留原样，
+    // 只需保证前缀是 'BV'（兼容 href 里出现小写 bv 的情况）。
+    const v = m[1];
+    return v.startsWith('BV') ? v : 'BV' + v;
+  }
+
+  // 纯函数：解析 x/web-interface/wbi/view 的响应，返回是否有 CC 及语言列表
+  // 兼容两种结构：data.subtitle.list（主接口，含人工+AI 字幕）与 data.subtitle.subtitles（播放器接口结构）
+  function parseViewSubtitles(json) {
+    try {
+      const sub = (json && json.data && json.data.subtitle) || {};
+      const list = sub.list || sub.subtitles || [];
+      const langs = list.map((s) => (s.lan_doc || s.lan || '')).filter(Boolean);
+      return { hasCc: list.length > 0, langs: langs };
+    } catch (e) { return { hasCc: false, langs: [] }; }
+  }
+
+  // 给 view 接口加 wbi 签名（与 fetchSubtitleList 同款），显著降低无签名被百度风控→空数据的概率
+  async function fetchViewSigned(bvid) {
+    const mixinKey = await getWbiKeys();
+    const wts = Math.floor(Date.now() / 1000);
+    const params = { bvid: bvid, wts: wts };
+    const keys = Object.keys(params).sort();
+    let query = '';
+    for (const k of keys) query += (query ? '&' : '') + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+    const w_rid = md5hex(query + getMixinKey(mixinKey));
+    const now = Date.now();
+    const gap = now - ccLastReqTs;
+    if (gap < CC_REQ_GAP) { await new Promise((r) => setTimeout(r, CC_REQ_GAP - gap)); }
+    ccLastReqTs = Date.now();
+    // ⚠️ 必须用 wbi/view 端点：老 x/web-interface/view 已被 B 站风控整体 412（返回 HTML 挑战页而非 JSON），
+    // wbi/view 即使不带签名也能正常返回 JSON，带签名更稳。
+    return fetch('https://api.bilibili.com/x/web-interface/wbi/view?' + query + '&w_rid=' + w_rid, { credentials: 'include' });
+  }
+
+  function normalizeHref(href) {
+    if (!href) return '';
+    let h = href;
+    if (h.indexOf('//') === 0) h = 'https:' + h;
+    else if (h.indexOf('/') === 0) h = 'https://www.bilibili.com' + h;
+    else if (!/^https?:\/\//.test(h)) h = 'https://www.bilibili.com/' + h;
+    return h;
+  }
+
+  function getVideoCards() {
+    const cards = [];
+    const seen = {};
+    const links = document.querySelectorAll('a.bili-video-card__image[href*="/video/BV"], a[href*="bilibili.com/video/BV"]');
+    links.forEach((a) => {
+      const href = a.getAttribute('href') || '';
+      const bvid = extractBvid(href);
+      if (!bvid || seen[bvid]) return;
+      seen[bvid] = true;
+      const root = a.closest('.bili-video-card') || a.parentElement;
+      let title = '';
+      const titleEl = root ? root.querySelector('.bili-video-card__info--tit, .bili-video-card__info > a, [title]') : null;
+      if (titleEl) title = (titleEl.getAttribute('title') || titleEl.textContent || '').trim();
+      if (!title) title = a.getAttribute('title') || '';
+      cards.push({ a: a, root: root, bvid: bvid, title: title, href: normalizeHref(href) });
+    });
+    return cards;
+  }
+
+  async function checkCc(bvid) {
+    if (ccCache[bvid]) return ccCache[bvid];
+    try {
+      const r = await fetchViewSigned(bvid);
+      let j = null;
+      try { j = await r.json(); } catch (e) { j = null; }
+      if (!r.ok || !j || typeof j.code === 'undefined') {
+        // 非JSON 响应多半是 B 站风控挑战页（如 412），把状态码透出到面板便于定位
+        ccLastErr = 'HTTP ' + (r && r.status) + (r && !j ? '（非JSON）' : '');
+        log('checkCc 网络层失败', bvid, 'status=' + (r && r.status));
+        const err = { hasCc: false, langs: [], bvid: bvid, err: true };
+        ccCache[bvid] = err;
+        return err;
+      }
+      if (j.code !== 0) {
+        ccLastErr = 'code ' + j.code;
+        log('checkCc 业务码非0', bvid, 'code=' + j.code, (j.message || ''));
+        const err = { hasCc: false, langs: [], bvid: bvid, err: true };
+        ccCache[bvid] = err;
+        return err;
+      }
+      const res = parseViewSubtitles(j);
+      res.bvid = bvid;
+      ccCache[bvid] = res;
+      ccLastErr = '';
+      return res;
+    } catch (e) {
+      ccLastErr = (e && e.message) ? String(e.message).slice(0, 40) : '异常';
+      log('checkCc 异常', bvid, e && e.message);
+      const res = { hasCc: false, langs: [], bvid: bvid, err: true };
+      ccCache[bvid] = res;
+      return res;
+    }
+  }
+
+  function drainCc() {
+    while (ccRunning < CC_MAX_CONCURRENCY && ccQueue.length) {
+      const card = ccQueue.shift();
+      ccRunning++;
+      checkCc(card.bvid).then((res) => {
+        ccRunning--;
+        ccScanned++;
+        if (res.err) ccFail++;
+        if (res.hasCc) { markCard(card, res.langs); addPanelItem(card, res.langs); }
+        updateCcCount();
+        if (ccRunning < CC_MAX_CONCURRENCY && ccQueue.length) drainCc();
+      }).catch(() => {
+        ccRunning--; ccScanned++; ccFail++; updateCcCount();
+        if (ccRunning < CC_MAX_CONCURRENCY && ccQueue.length) drainCc();
+      });
+    }
+  }
+
+  function enqueueCc(card) { ccQueue.push(card); drainCc(); }
+
+  function buildSearchPanel() {
+    if (ccPanel) return ccPanel;
+    const el = document.createElement('div');
+    el.id = 'll-cc-panel';
+    el.innerHTML =
+      '<div class="ll-cc-bar"><span class="ll-cc-title">有 CC 字幕</span>' +
+      '<span class="ll-cc-count">0</span>' +
+      '<button class="ll-cc-min" title="收起 / 展开">—</button></div>' +
+      '<div class="ll-cc-progbar"><span class="ll-cc-prog">已查 0/0</span>' +
+      '<button class="ll-cc-rescan" title="清空失败缓存并重新检测">重测</button></div>' +
+      '<div class="ll-cc-list"></div>';
+    document.body.appendChild(el);
+    el.querySelector('.ll-cc-min').addEventListener('click', () => el.classList.toggle('ll-cc-collapsed'));
+    el.querySelector('.ll-cc-rescan').addEventListener('click', () => {
+      ccCheckedMap = {};
+      for (const k of Object.keys(ccCache)) if (ccCache[k] && ccCache[k].err) delete ccCache[k];
+      ccScanned = 0; ccFail = 0; ccLastErr = '';
+      scanSearchPage();
+    });
+    ccPanel = el;
+    return el;
+  }
+
+  function markCard(card, langs) {
+    if (!card || !card.root || !card.root.appendChild) return;
+    if (card.root.querySelector('.ll-cc-badge')) return;
+    const tag = document.createElement('div');
+    tag.className = 'll-cc-badge';
+    tag.textContent = 'CC';
+    tag.title = '有 CC 字幕：' + (langs || []).join('、');
+    card.root.appendChild(tag);
+    const pos = card.root.style.position;
+    if (!pos || pos === 'static') card.root.style.position = 'relative';
+  }
+
+  function addPanelItem(card, langs) {
+    if (!ccPanel || !ccPanel.querySelector) return;
+    if (ccPanel.querySelector('[data-bv="' + card.bvid + '"]')) return;
+    const list = ccPanel.querySelector('.ll-cc-list');
+    const item = document.createElement('div');
+    item.className = 'll-cc-item';
+    item.setAttribute('data-bv', card.bvid);
+    const pills = (langs || []).map((l) => '<span class="ll-cc-lang">' + ccHtml(l) + '</span>').join('');
+    item.innerHTML = '<div class="ll-cc-ititle">' + ccHtml(card.title || card.bvid) + '</div>' +
+      '<div class="ll-cc-langs">' + pills + '</div>';
+    item.addEventListener('click', () => {
+      window.open(card.href || ('https://www.bilibili.com/video/' + card.bvid), '_blank');
+    });
+    list.appendChild(item);
+    updateCcCount();
+  }
+
+  function updateCcCount() {
+    if (!ccPanel || !ccPanel.querySelector) return;
+    const n = ccPanel.querySelectorAll('.ll-cc-item').length;
+    const c = ccPanel.querySelector('.ll-cc-count');
+    if (c) c.textContent = String(n);
+    const prog = ccPanel.querySelector('.ll-cc-prog');
+    if (prog) prog.textContent = '已查 ' + ccScanned + '/' + ccTotal + (ccFail ? (' · 失败 ' + ccFail + (ccLastErr ? ('（' + ccLastErr + '）') : '')) : '');
+    ccPanel.classList.toggle('ll-cc-empty', n === 0);
+  }
+
+  function scanSearchPage() {
+    const href = (typeof location !== 'undefined' ? location.href : '');
+    if (href !== ccLastHref) {
+      ccLastHref = href;
+      ccCheckedMap = {};
+      ccScanned = 0; ccFail = 0; ccLastErr = ''; ccTotal = 0;
+      if (ccPanel && ccPanel.querySelector) {
+        const list = ccPanel.querySelector('.ll-cc-list');
+        if (list) list.innerHTML = '';
+        updateCcCount();
+      }
+    }
+    if (!settings.searchCcEnabled) { if (ccPanel) ccPanel.style.display = 'none'; return; }
+    if (!isListPage()) { if (ccPanel) ccPanel.style.display = 'none'; return; }
+    const cards = getVideoCards();
+    ccTotal = cards.length;
+    if (!cards.length) { if (ccPanel) ccPanel.style.display = 'none'; return; }
+    buildSearchPanel();
+    ccPanel.style.display = '';
+    for (const c of cards) {
+      if (ccCheckedMap[c.bvid]) continue;
+      ccCheckedMap[c.bvid] = true;
+      enqueueCc(c);
+    }
+  }
+
+  function initSearchCcScanner() {
+    scanSearchPage();
+    try {
+      const mo = new MutationObserver(() => scanSearchPage());
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {}
+    setInterval(scanSearchPage, 1500);
+  }
+
   async function init() {
     // 每一步都独立 try/catch：任何一处出错都不能阻止面板出现
     try { await getSettings(); } catch (e) { log('getSettings 失败', e); }
     try { currentSite = detectSite(); } catch (e) { log('detectSite 失败', e); }
     if (!settings.enabled) { log('disabled'); return; }
+    // 列表页（搜索结果 / UP 主空间等）：走 CC 字幕扫描器，不挂跟读面板
+    if (currentSite === 'bilibili' && isListPage()) {
+      try { initSearchCcScanner(); } catch (e) { log('CC 扫描器启动失败', e); }
+      return;
+    }
     try { buildPanel(); } catch (e) { log('buildPanel 失败', e); }
     try { addDiagButtonOnce(); } catch (e) { log('addDiagButton 失败', e); }
     // 接收 yt-main.js（MAIN world）桥接的 YouTube 轨道（面板就绪后再注册，避免 DOM 未就绪）
