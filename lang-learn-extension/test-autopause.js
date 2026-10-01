@@ -236,6 +236,16 @@ has('seek 落地解除保护期', contentJs, 'seekGuardUntil = 0;');
 has('诊断里能看到自动暂停状态', contentJs, "'自动暂停: '");
 has('诊断里能看到事件是否挂上', contentJs, "'video 事件已挂: '");
 has('诊断里能看到字幕时间轴重叠情况', contentJs, '字幕时间轴: 共 ');
+// ---------- 用例 5b：popup 默认与面板本页覆盖分离（修复"设置里勾了就关不掉"） ----------
+console.log('— popup 全局默认 与 面板本页覆盖 分离 —');
+ok('面板按钮不再把覆盖写回全局默认（否则会与 popup 默认打架、体感关不掉）',
+  contentJs.indexOf('chrome.storage.sync.set({ autoPause: settings.autoPause })') < 0, '仍残留会覆盖全局的写法');
+has('面板覆盖用独立的 autoPausePanel 标志', contentJs, 'autoPausePanel');
+has('有「生效值 = 面板覆盖 ? 覆盖 : 全局默认」的求值', contentJs, 'function effAutoPause');
+ok('getSettings 重载时回到「跟随默认」（autoPausePanel 置空）',
+  /autoPausePanel = null/.test(contentJs), '缺少重置');
+ok('applySettings 用 effAutoPause() 而非直接读默认值',
+  contentJs.indexOf('settings.autoPause = effAutoPause();') >= 0, '未走 effAutoPause');
 
 console.log('\n通过 ' + pass + ' / ' + (pass + fail));
 process.exit(fail ? 1 : 0);

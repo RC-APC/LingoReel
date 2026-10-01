@@ -3,6 +3,12 @@
 
   let panel = null;
   let settings = { enabled: true, autoPause: false, dictSource: 'api', eudicAction: 'lp-dict', searchCcEnabled: true };
+  // 自动暂停有「两层」概念，必须分开，否则面板按钮会被 popup 全局默认压住（用户反馈的"关不掉"）：
+  //   autoPauseDefault —— popup 复选框里的全局默认，持久存 chrome.storage.sync.autoPause，作为每个新页面的起点；
+  //   autoPausePanel  —— 面板上「暂停：开/关」按钮的本页临时覆盖：null=跟随全局默认，翻过后不再写回全局。
+  let autoPauseDefault = false;
+  let autoPausePanel = null;
+  function effAutoPause() { return autoPausePanel !== null ? autoPausePanel : autoPauseDefault; }
   let observedEl = null;
   let observer = null;
   let tickTimer = null;
@@ -98,7 +104,9 @@
         chrome.storage.sync.get(['enabled', 'autoPause', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget', 'panelOpacity', 'textOpacity', 'liveShadow', 'searchCcEnabled'], (r) => {
           try {
             settings.enabled = r.enabled !== false;
-            settings.autoPause = !!r.autoPause;
+            autoPauseDefault = !!r.autoPause;
+            autoPausePanel = null;            // 每次从存储重载都回到「跟随默认」
+            settings.autoPause = autoPauseDefault;
             settings.dictSource = r.dictSource || 'api';
             settings.eudicAction = r.eudicAction || 'lp-dict';
             dictSource = settings.dictSource;
@@ -609,8 +617,10 @@
       setCollapsed(!panel.classList.contains('ll-collapsed'));
     };
     document.getElementById('ll-pause').onclick = (e) => {
-      settings.autoPause = !settings.autoPause;
-      chrome.storage.sync.set({ autoPause: settings.autoPause });
+      // 面板按钮是本页临时覆盖：反转当前「生效值」，并且【不写回全局默认】，
+      // 这样即便 popup 里勾了自动暂停，面板也能独立关掉当前页（全局默认下次新标签仍生效）。
+      autoPausePanel = !effAutoPause();
+      settings.autoPause = autoPausePanel;
       e.target.textContent = (settings.autoPause ? t('pauseOn') : t('pauseOff'));
       // 开关切换时丢掉旧目标：关着的时候目标可能已经过期，重新打开会一上来就立刻暂停
       pendingPauseAt = null; pendingPauseCue = null; lastAutoPauseTo = null;
@@ -2689,7 +2699,7 @@
     // 自动暂停体检：这三行能直接区分「开关没生效 / 事件没挂上 / 目标被一直往前推」三种失败
     lines.push('video 事件已挂: ' + (videoWired ? '是' : '否（timeupdate 不来 → 高亮/实时行/自动暂停都会失灵）') +
       (wiredEl ? '，已挂元素当前时间 ' + (wiredEl.currentTime || 0).toFixed(1) + 's' : ''));
-    lines.push('自动暂停: ' + (settings.autoPause ? '开' : '关') +
+    lines.push('自动暂停: ' + (settings.autoPause ? '开' : '关') + (autoPausePanel !== null ? '（面板覆盖）' : '') +
       '，目标: ' + (pendingPauseAt != null ? pendingPauseAt.toFixed(1) + 's' +
         (pendingPauseCue ? '（第 ' + pendingPauseCue.index + ' 行，原始到 ' + pendingPauseCue.to.toFixed(1) + 's）' : '') : '（未武装）') +
       (autoPauseInfo ? '，上次自动暂停于 ' + autoPauseInfo.at.toFixed(1) + 's（第 ' + autoPauseInfo.idx + ' 行）' : '，本次尚未自动暂停过'));
@@ -2847,7 +2857,8 @@
       const prevDict = dictSource;
       const prevAutoPause = settings.autoPause;
       settings.enabled = r.enabled !== false;
-      settings.autoPause = !!r.autoPause;
+      autoPauseDefault = !!r.autoPause;
+      settings.autoPause = effAutoPause();   // 面板本页覆盖优先；没翻过才跟随全局默认
       settings.searchCcEnabled = r.searchCcEnabled !== false;
       // 自动暂停开关变化（如从设置页改的）→ 丢掉旧目标，按当前播放位置重新武装
       if (prevAutoPause !== settings.autoPause) { pendingPauseAt = null; pendingPauseCue = null; lastAutoPauseTo = null; }

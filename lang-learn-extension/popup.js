@@ -186,7 +186,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSettings();
   renderVocab();
   ['enabled', 'autoPause', 'searchCc', 'dictSource', 'eudicAction', 'autoTranslate', 'trEngine', 'translateTarget',
-    'llmOn', 'llmPreset', 'llmBase', 'llmModel', 'llmKey'].forEach((id) => {
+    'llmOn', 'llmBase', 'llmModel', 'llmKey'].forEach((id) => {
     $(id).addEventListener('change', saveSettings);
     $(id).addEventListener('input', saveSettings);
   });
@@ -211,7 +211,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     saveSettings();
   });
-  $('llmPreset').addEventListener('change', () => applyPreset($('llmPreset').value, true));
+  // 选预设要「先填好 base+model 再存盘」：否则通用的 saveSettings 会在 applyPreset 之前先把旧的 base 存回去，
+  // 表现就是"模型选了别的、网址还是上一家的"。这里不再走通用循环，单独处理以保证原子性。
+  $('llmPreset').addEventListener('change', () => {
+    applyPreset($('llmPreset').value, true);
+    saveSettings();
+  });
   $('llmTest').addEventListener('click', testLlm);
   $('clearVocab').addEventListener('click', () => {
     if (confirm('确定清空生词本？')) {
