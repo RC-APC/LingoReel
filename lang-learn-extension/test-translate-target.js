@@ -75,7 +75,7 @@ ok('新提示改为「当前字幕已是所选母语」', contentJs.indexOf('当
 ok('进度文案不再拼接英文语言名（避免中英文混杂）', contentJs.indexOf("正在翻译成' + langDocName") < 0);
 
 console.log('— manifest —');
-ok('manifest 版本已升到 1.0.7', manifest.version === '1.0.7');
+ok('manifest 版本已升到 1.0.8', manifest.version === '1.0.8');
 
 console.log('\n通过 ' + pass + ' / ' + (pass + fail) + (fail ? '  ❌ 有失败' : '  ✅ 全部通过'));
 process.exit(fail ? 1 : 0);

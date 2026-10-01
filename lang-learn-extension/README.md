@@ -4,7 +4,7 @@
 > 把 **B 站 / YouTube** 视频变成学习材料：逐句字幕列表、跟读录音评分、点词查词、生词本、间隔重复复习、AI 字幕翻译。
 > All data stays in your browser (`chrome.storage.local`) — **no login, no account, nothing uploaded**. 数据全在本地，**无需登录、无账号、不上传**。
 
-**Version v1.0.7** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
+**Version v1.0.8** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
 
 [![Get LingoReel for Chrome](https://img.shields.io/badge/Chrome_Web_Store-Download-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/lingoreel/jghdcidakakmfacgnpmiepeplfgljbmc)
 [![Get LingoReel for Edge](https://img.shields.io/badge/Microsoft_Edge-Download-0078D4?logo=microsoftedge&logoColor=white)](https://microsoftedge.microsoft.com/addons/detail/lingoreel/jfdkckgipihhiebhcgembhpmdoeediio)
@@ -102,6 +102,7 @@ The hard part of learning from foreign-language videos isn't *seeing* subtitles 
 - **Free translation endpoints have quotas**: Google may rate-limit (429) and MyMemory's anonymous quota is a few thousand chars/day; very long videos may translate only part — click "译 [native]" again later to continue. Translations are machine output; don't treat them as ground truth.
 - **Over-long videos translate the first 1500 lines only**: beyond that the free endpoints hard-fail; better to get the first half done.
 - **Custom LLM domains need one authorization**: DeepSeek / SiliconFlow / Zhipu / Kimi / Qwen / Volc / OpenAI / Groq are built into `host_permissions` (no auth needed); a relay/proxy outside that list will prompt once for authorization when you click "Test connection".
+- **Shadowing score relies on the browser's online speech recognition**: Chrome/Edge send the recording to Google's speech service, so it must be reachable. On Bilibili over a direct mainland-China connection it usually isn't — the panel now says so explicitly (`识别失败：语音识别服务连不上`) instead of silently scoring 0. **Recording itself still works**: use **🔁 我的录音** to replay your take and self-assess. (Subtitle `lan` tags are normalized to standard BCP-47 first — Chrome rejects `zh-Hans` outright; see v1.0.8.)
 
 ## Project layout
 
@@ -123,7 +124,7 @@ lang-learn-extension/
 
 ## Tests
 
-**19** self-contained Node tests (no dependencies for most; **4** end-to-end need `jsdom`):
+**20** self-contained Node tests (no dependencies for most; **4** end-to-end need `jsdom`):
 
 | Test | Covers |
 |---|---|
@@ -146,6 +147,7 @@ lang-learn-extension/
 | `test-fullscreen.js` | (needs `npm i jsdom`) fullscreen floating window: re-parent into fullscreen, auto-switch, restore on exit; `<video>` fullscreen container fallback |
 | `test-search-cc.js` | Bilibili CC scan: `wbi/view` endpoint, BV-case sensitivity, list-page detection, no old `view` endpoint (43 assertions) |
 | `test-popup-llm.js` | Popup LLM preset switching: Base URL **and** model update together and are persisted atomically — regression lock for the "model changed but URL stayed DeepSeek" bug (needs `jsdom`, 9 assertions) |
+| `test-rec-lang.js` | Shadowing recording: subtitle `lan` normalized to BCP-47 labels Chrome accepts (`zh-Hans`→`zh-CN`), all 12 real Bilibili `lan` values land in the supported list, speech/mic errors surfaced instead of swallowed (45 assertions) |
 
 ```bash
 # syntax check
@@ -162,12 +164,14 @@ node test-live-words.js
 node test-search-cc.js
 node test-translate-target.js
 node test-pron-score.js
+node test-rec-lang.js
 # end-to-end (optional dependency)
 npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test-fullscreen.js && node test-popup-llm.js
 ```
 
 ## Version highlights (selected)
 
+- **v1.0.8** **Shadowing recording failed on Bilibili (worked on YouTube).** Two causes, both fixed. ① **Subtitle `lan` was passed to `SpeechRecognition.lang` raw.** Bilibili's real `lan` values are `zh-Hans` / `zh-Hant` / `ase` / `iw` (confirmed against the live `wbi/view` response), but Chrome only accepts standard labels like `zh-CN` / `zh-TW` — handing it `zh-Hans` raises `language-not-supported` immediately. YouTube tracks are usually `en` → `en-US`, which the old map happened to cover, hence "works there". Language tags are now normalized (alias → exact → preferred region → fallback), and `language-not-supported` now retries once with `en-US` instead of giving up. ② **`sr.onerror = () => {}` swallowed every error**, so a failure looked like "recording did nothing". Errors are now surfaced with actionable hints (`network` = speech service unreachable, `not-allowed` = grant permission, `audio-capture` = no mic input…), and `getUserMedia` failures are differentiated too (permission denied vs. no device vs. device busy).
 - **v1.0.7** **Two popup/panel control bugs fixed.** ① **Auto-pause couldn't be turned off.** The popup's "Auto-pause" checkbox and the panel's "Pause" button were writing the *same* persisted key, so once you enabled it globally in the popup, "on" kept beating the panel's attempts to switch it off. They're now separate: the popup sets the **starting state for new pages**, and the panel button is a **per-page temporary override** that never writes back — you can always stop auto-pause for the current tab. Diagnostics label the state `(panel override)` so you can tell which one is active. ② **Choosing an LLM preset didn't update the Base URL** — you'd pick another provider yet the URL stayed on DeepSeek. The preset's `change` handler had two listeners: a generic auto-save ran *first* (persisting the **old** values) while `applyPreset` ran later (filling the new ones but never saving). Preset switching is now one atomic step: fill Base URL + model, **then** persist both together.
 - **v1.0.6** **CC scan fully fixed (two fatal bugs).** ① The old `x/web-interface/view` endpoint is now hard rate-limited (412) and returns an HTML challenge page instead of JSON — every `checkCc` parse failed. Switched to the live **`x/web-interface/wbi/view`** endpoint (wbi-signed). ② `extractBvid` wrongly called `.toUpperCase()` on the BV id — but **BV ids are case-sensitive**, so `BV1ujaZ68Ea5` became `BV1UJAZ68EA5` and Bilibili returned `-404` for 105/108 videos. Removed the casing rewrite; the panel now surfaces the failure reason (e.g. `failed K (HTTP 412)` / `code -352`).
 - **v1.0.5** **CC scan was effectively dead.** Added wbi signing + 140 ms throttle + concurrency drop to 3, AI-subtitle-track compatibility, and a live progress + **Retry** button in the CC panel.
@@ -307,6 +311,7 @@ Released under the [MIT License](LICENSE).
 - **免费翻译接口有额度**：Google 端点随时可能限流（429），MyMemory 匿名额度约每日数千字符；长视频可能只翻译出一部分，隔一会再点「译 [母语]」可继续。译文是机器翻译，别当标准答案。
 - **超长视频只译前 1500 行**：再长会让免费接口直接限流到全线失败，宁可先给前半段。
 - **自定义大模型域名要授权一次**：DeepSeek / 硅基流动 / 智谱 / Kimi / 通义 / 火山 / OpenAI / Groq 已内置在 `host_permissions` 里，**直接用不用授权**；填了列表外的中转站域名时，点「测试连接」会弹一次授权请求，允许后后台才能发出去。
+- **跟读打分依赖浏览器的在线语音识别**：Chrome/Edge 会把录音送到 Google 的识别服务，必须能连通才行。在 B站 直连国内网络时通常连不通——面板现在会明确提示「识别失败：语音识别服务连不上」，而不是默默打 0 分。**录音本身是成功的**，可点 **🔁 我的录音** 回放自评。（字幕 `lan` 会先规范化成标准 BCP-47，因为 Chrome 完全不接受 `zh-Hans`；见 v1.0.8。）
 
 ## 目录结构
 
@@ -328,7 +333,7 @@ lang-learn-extension/
 
 ## 测试
 
-仓库自带 **19** 个 Node 测试（多数零依赖，**4** 个端到端需 `jsdom`），覆盖最容易出错的几处逻辑：
+仓库自带 **20** 个 Node 测试（多数零依赖，**4** 个端到端需 `jsdom`），覆盖最容易出错的几处逻辑：
 
 | 测试 | 覆盖内容 |
 |---|---|
@@ -351,6 +356,7 @@ lang-learn-extension/
 | `test-fullscreen.js` | （需 `npm i jsdom`）全屏浮窗：进全屏改挂到全屏容器、自动切浮窗、退出还原；`<video>` 全屏的换容器补救 |
 | `test-search-cc.js` | B 站 CC 扫描：走 `wbi/view` 端点、BV 大小写敏感、列表页判定、不再调老 `view` 端点（43 断言） |
 | `test-popup-llm.js` | 弹窗大模型预设切换：切预设时 Base URL 与模型名一起更新并一起存盘——锁死"模型改了但网址还是 DeepSeek"的回归（需 `jsdom`，9 断言） |
+| `test-rec-lang.js` | 跟读录音：字幕 `lan` 规范化为 Chrome 认得的 BCP-47（`zh-Hans`→`zh-CN`）、B站 实测 12 个 `lan` 全部落在支持列表内、识别/麦克风错误不再被吞（45 断言） |
 
 ```bash
 # 语法检查
@@ -367,12 +373,14 @@ node test-live-words.js
 node test-search-cc.js
 node test-translate-target.js
 node test-pron-score.js
+node test-rec-lang.js
 # 端到端（可选依赖）
 npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test-fullscreen.js && node test-popup-llm.js
 ```
 
 ## 主要版本历程（节选）
 
+- **v1.0.8** **修好「B站 录音不成功、YouTube 正常」。** 两个原因：① **字幕 `lan` 被原样塞给了 `SpeechRecognition.lang`**：B站 字幕 lan 的真实取值是 `zh-Hans` / `zh-Hant` / `ase` / `iw`（已用 `wbi/view` 真实响应确认），而 Chrome 只认 `zh-CN` / `zh-TW` 这类标准标签，收到 `zh-Hans` 会直接报 `language-not-supported`；YouTube 的轨道多为 `en` → `en-US`，恰好被旧的映射表覆盖，所以"那边正常"。现在会把语言标签规范化（别名 → 精确 → 首选地区 → 兜底），且遇到"语言不支持"会自动降级 `en-US` 重试一次。② **`sr.onerror = () => {}` 把所有错误都吞了**，失败时看起来就是"录音没反应"。现在错误会明确提示（`network` = 识别服务连不上、`not-allowed` = 未授权、`audio-capture` = 没抓到声音…），`getUserMedia` 失败也细分了（权限被拒 / 无设备 / 设备被占用）。
 - **v1.0.7** **修好两处「设置 / 面板互相打架」的控制问题。** ① **自动暂停关不掉**：弹窗里的「自动暂停」复选框与面板上的「暂停」按钮此前写的是**同一个持久化键**，一旦在弹窗勾了全局默认，「开」就会持续压过面板的关闭动作，体感就是"面板不受控"。现改为分离：弹窗负责**新页面的起始状态**，面板按钮是**只影响当前页的临时覆盖**、不再回写全局——视频中途关掉就一直关着；诊断里会标注「（面板覆盖）」便于分辨当前是哪个在生效。② **选大模型预设时网址不跟着变**：模型选了别家、Base URL 还停在 DeepSeek。根因是预设下拉的 `change` 上挂了两个监听器——通用自动保存**先跑**（把**旧**的 base/model 存盘），`applyPreset` **后跑**（填入新值却不再保存），导致预设填好的网址从未持久化、重开弹窗又被旧值覆盖。现在改成一步原子操作：先填 Base URL 与模型名，**再**一起存盘。
 - **v1.0.6** **CC 扫描彻底修好（两处致命 bug）。** ① 老 `x/web-interface/view` 端点现已被 B 站整体 412 风控、返回 HTML 挑战页而非 JSON，导致每条 `checkCc` 解析全挂；改用活端点 **`x/web-interface/wbi/view`**（带 wbi 签名）。② `extractBvid` 误把 BV 号 `.toUpperCase()`——但 **BV 号大小写敏感**，`BV1ujaZ68Ea5` 被改成 `BV1UJAZ68EA5` 后 B 站对 108 个里 105 个返回 `-404`。去掉大小写改写；面板现在会把失败原因透出（如 `失败 K（HTTP 412）` / `code -352`）。
 - **v1.0.5** **CC 扫描此前基本失效**：给 view 加 wbi 签名 + 140ms 节流 + 并发降到 3，兼容 AI 字幕轨道结构，面板加实时进度与「重测」按钮。

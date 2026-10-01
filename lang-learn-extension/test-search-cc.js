@@ -107,7 +107,7 @@ const matches = manifest.content_scripts[0].matches;
 ok('manifest 已覆盖 search.bilibili.com', matches.indexOf('https://search.bilibili.com/*') >= 0);
 ok('manifest 已覆盖 space.bilibili.com', matches.indexOf('https://space.bilibili.com/*') >= 0);
 ok('manifest 已用通配覆盖 www 站内列表页（含 /c/ 分类页）', matches.indexOf('https://www.bilibili.com/*') >= 0);
-ok('manifest 版本已升到 1.0.7', manifest.version === '1.0.7', '当前 ' + manifest.version);
+ok('manifest 版本已升到 1.0.8', manifest.version === '1.0.8', '当前 ' + manifest.version);
 
 console.log('\n通过 ' + pass + ' / ' + (pass + fail));
 process.exit(fail ? 1 : 0);

@@ -44,6 +44,8 @@
   let activeRecTimer = null;     // 录音计时器
   let activeRecChunks = null;    // MediaRecorder 数据块
   let activeRecTranscript = '';  // 语音识别累积文本
+  let activeRecErr = '';         // 语音识别错误码（network / language-not-supported / not-allowed …）
+  let activeRecRetried = false;  // 是否已因"语言不支持"降级重试过一次
   let videoWired = false;
 
   // API 字幕相关
@@ -1583,11 +1585,82 @@
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
+  // ⚠️ 别把字幕轨道的 lan 直接塞给 SpeechRecognition.lang。
+  // 实测 B站 字幕 lan 是 zh-Hans / zh-Hant / ase / iw 这类值（YouTube 也有 zh-Hans），
+  // 而 Chrome/Edge 的语音识别只认 zh-CN / zh-TW 等标准标签，收到 zh-Hans 会直接报
+  // language-not-supported —— 再叠加下面原本吞掉错误的 onerror，表现就是"B站录音完全没反应"。
+  // 规范化顺序：别名 → 精确命中 → 主语言前缀 → 兜底（浏览器语言 → en-US）。
+  const SR_SUPPORTED = ('af-ZA am-ET ar-SA az-AZ bg-BG bn-BD bn-IN ca-ES cs-CZ da-DK de-DE el-GR en-AU en-CA en-GB en-IN en-NZ en-US ' +
+    'es-ES es-MX es-US et-EE eu-ES fa-IR fi-FI fr-FR gl-ES gu-IN he-IL hi-IN hr-HR hu-HU hy-AM id-ID is-IS it-IT ja-JP jv-ID km-KH kn-IN ko-KR ' +
+    'lo-LA lt-LT lv-LV ml-IN mr-IN ms-MY my-MM ne-NP nl-NL no-NO pl-PL pt-BR pt-PT ro-RO ru-RU si-LK sk-SK sq-AL sr-RS sv-SE sw-KE ta-IN te-IN ' +
+    'th-TH tr-TR uk-UA ur-PK uz-UZ vi-VN yue-Hant-HK zh-CN zh-HK zh-TW').split(' ');
+  const SR_ALIAS = {
+    'zh-hans': 'zh-CN', 'zh-hant': 'zh-TW', 'zh-chs': 'zh-CN', 'zh-cht': 'zh-TW',
+    'iw': 'he-IL', 'in': 'id-ID', 'jw': 'jv-ID', 'mo': 'ro-RO',
+    'yue': 'yue-Hant-HK', 'zh-yue': 'yue-Hant-HK'
+  };
+  // 只给了主语言（en / ja / ca …）时用这张表挑首选地区，
+  // 否则按列表顺序抓取会把 en 变成 en-AU（实测踩到）。
+  const SR_PREFERRED = {
+    en: 'en-US', zh: 'zh-CN', es: 'es-ES', pt: 'pt-BR', fr: 'fr-FR', de: 'de-DE',
+    ja: 'ja-JP', ko: 'ko-KR', ru: 'ru-RU', it: 'it-IT', ar: 'ar-SA', bn: 'bn-IN',
+    ta: 'ta-IN', nl: 'nl-NL', pl: 'pl-PL', tr: 'tr-TR', th: 'th-TH', vi: 'vi-VN',
+    id: 'id-ID', hi: 'hi-IN', sv: 'sv-SE', da: 'da-DK', fi: 'fi-FI', no: 'no-NO',
+    cs: 'cs-CZ', el: 'el-GR', he: 'he-IL', hu: 'hu-HU', ro: 'ro-RO', uk: 'uk-UA',
+    ca: 'ca-ES', eu: 'eu-ES', gl: 'gl-ES', sr: 'sr-RS', sk: 'sk-SK', ms: 'ms-MY'
+  };
+  function srPick(list, lower) {
+    if (!lower) return '';
+    const hit = list.filter((x) => x.toLowerCase() === lower)[0];
+    if (hit) return hit;
+    const main = lower.split('-')[0];
+    if (!main) return '';
+    return list.filter((x) => x.split('-')[0].toLowerCase() === main)[0] || '';
+  }
+  function fallbackRecLang() {
+    // 兜底：浏览器语言本身可用就用它，否则 en-US
+    return srPick(SR_SUPPORTED, String((navigator && navigator.language) || '').toLowerCase()) || 'en-US';
+  }
+  // 纯函数：字幕 lan → 浏览器识别认得的 BCP-47 标签
+  function normalizeRecLang(raw) {
+    const s = String(raw == null ? '' : raw).trim().replace(/^ai-/i, ''); // B站 AI 字幕形如 ai-zh
+    const lower = s.toLowerCase();
+    if (!lower) return fallbackRecLang();
+    if (SR_ALIAS[lower]) return SR_ALIAS[lower];
+    // 注意：这里必须"纯精确"匹配。srPick 内部带前缀兜底（en 会抓到 en-AU），
+    // 短码要留给下面的首选地区表处理。
+    const exact = SR_SUPPORTED.filter((x) => x.toLowerCase() === lower)[0];
+    if (exact) return exact;                                  // 精确命中（en-US / zh-CN…）
+    const main = lower.split('-')[0];
+    if (SR_PREFERRED[main]) return SR_PREFERRED[main];        // 只有主语言（en / ja…）→ 首选地区
+    return srPick(SR_SUPPORTED, main) || fallbackRecLang();   // 地区不被支持 → 退回主语言
+  }
   function recLang() {
     const t = subtitleTracks[selectedTrack];
-    const lan = (t && t.lan) || 'en';
-    const map = { en: 'en-US', ja: 'ja-JP', ko: 'ko-KR', zh: 'zh-CN', fr: 'fr-FR', de: 'de-DE', es: 'es-ES', ru: 'ru-RU', pt: 'pt-BR', it: 'it-IT' };
-    return map[lan] || (lan.length <= 2 ? (lan + '-' + lan.toUpperCase()) : lan) || 'en-US';
+    return normalizeRecLang((t && t.lan) || 'en');
+  }
+  // 语音识别错误 → 人话提示（network 是国内最常见的：识别服务走 Google，B站 直连通常不通）
+  function srErrHint(code) {
+    const map = {
+      'network': '语音识别服务连不上（Chrome/Edge 的识别走 Google 在线服务，B站 直连常常不通）；录音已存，可点回放自评',
+      'language-not-supported': '该字幕语言不被浏览器语音识别支持，已自动改用 en-US 重试',
+      'not-allowed': '浏览器未允许语音识别，请点地址栏权限图标放行后重试',
+      'service-not-allowed': '浏览器未允许语音识别，请点地址栏权限图标放行后重试',
+      'audio-capture': '没抓到麦克风声音，请确认麦克风可用且没被静音',
+      'no-speech': '没听到说话，离话筒近一点再读一次',
+      'aborted': '识别已中止'
+    };
+    return map[code] || ('识别出错（' + code + '）；录音已存，可点回放自评');
+  }
+  function micErrHint(err) {
+    const name = (err && err.name) || '';
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+      return '麦克风权限被拒绝——请点地址栏左侧的麦克风/摄像头图标 → 允许，再重试';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return '没检测到麦克风设备';
+    if (name === 'NotReadableError' || name === 'TrackStartError') return '麦克风被其它程序占用，关掉占用它的软件再试';
+    if (name === 'OverconstrainedError') return '麦克风不满足录音约束';
+    return (err && err.message) ? err.message : String(err || '未知错误');
   }
   // 归一化：小写、去标点、折叠空白
   function norm(s) {
@@ -1631,6 +1704,7 @@
     const btn = activeRecRow && activeRecRow.querySelector('.ll-rec');
     if (btn) { btn.classList.remove('recording'); btn.textContent = '🎤'; }
     activeRecorder = null; activeRecRow = null; activeRecCue = null; activeRecChunks = null; activeRecTranscript = '';
+    activeRecErr = ''; activeRecRetried = false;
   }
   function toggleRecord(cue, row) {
     if (activeRecRow === row && activeRecorder) { stopRec(); return; }
@@ -1643,33 +1717,62 @@
   }
   async function startRec(cue, row) {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        // 麦克风单独捕获：这里失败跟"语音识别"无关，要给可操作的引导（多半是权限被拒）
+        showToast('麦克风开启失败：' + micErrHint(e));
+        cleanupRec();
+        return;
+      }
       activeRecStream = stream;
       activeRecChunks = [];
       activeRecTranscript = '';
+      activeRecErr = '';
+      activeRecRetried = false;
       activeRecCue = cue; activeRecRow = row;
       const rec = new MediaRecorder(stream);
       rec.ondataavailable = (e) => { if (e.data && e.data.size) activeRecChunks.push(e.data); };
       activeRecorder = rec;
       rec.start();
-      // 语音识别（识别用户说的文字）
+      // 语音识别（把用户说的话转成文字用于打分）
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SR) {
-        const sr = new SR();
-        sr.lang = recLang();
-        sr.interimResults = true;
-        sr.continuous = false;
-        sr.onresult = (ev) => {
-          let t = '';
-          for (let i = ev.resultIndex; i < ev.results.length; i++) t += ev.results[i][0].transcript;
-          activeRecTranscript = t;
-          const rEl = row.querySelector('.ll-rec-result .ll-rec-recog');
-          if (rEl) rEl.textContent = '识别中：' + t;
+        const makeSr = (useLang) => {
+          const sr = new SR();
+          sr.lang = useLang;
+          sr.interimResults = true;
+          sr.continuous = false;
+          sr.onresult = (ev) => {
+            let t = '';
+            for (let i = ev.resultIndex; i < ev.results.length; i++) t += ev.results[i][0].transcript;
+            activeRecTranscript = t;
+            const rEl = row.querySelector('.ll-rec-result .ll-rec-recog');
+            if (rEl) rEl.textContent = '识别中：' + t;
+          };
+          sr.onerror = (ev) => {
+            const code = (ev && ev.error) || 'error';
+            if (code === 'aborted') return; // 主动 stop 不算错误
+            // 语言不被支持（B站 zh-Hans 这类）→ 降级成 en-US 重试一次，别直接认输
+            if (code === 'language-not-supported' && useLang !== 'en-US' && !activeRecRetried) {
+              activeRecRetried = true;
+              const next = makeSr('en-US');
+              activeRecognition = next;
+              try { next.start(); } catch (e) {}
+              return;
+            }
+            // 错误不再吞掉：network / not-allowed 等直接关系到"为什么没分"，必须让用户看见
+            activeRecErr = code;
+            const rEl = row.querySelector('.ll-rec-result .ll-rec-recog');
+            if (rEl) rEl.textContent = '识别失败：' + srErrHint(code);
+          };
+          sr.onend = () => {};
+          return sr;
         };
-        sr.onerror = () => {};
-        sr.onend = () => {};
+        const sr = makeSr(recLang());
         activeRecognition = sr;
-        try { sr.start(); } catch (e) {}
+        try { sr.start(); } catch (e) { activeRecErr = 'start-failed'; }
       }
       const btn = row.querySelector('.ll-rec');
       if (btn) { btn.classList.add('recording'); btn.textContent = '■'; btn.title = '录音中 · 点此停止'; }
@@ -1712,8 +1815,14 @@
     const rEl = row && row.querySelector('.ll-rec-result');
     if (!rEl) return;
     rEl.classList.add('show');
+    // 没识别出文字时，优先把真实错误码说出来（network=识别服务不通，not-allowed=未授权…）
+    const recogText = transcript
+      ? esc(transcript)
+      : (activeRecErr
+        ? esc('识别失败：' + srErrHint(activeRecErr))
+        : '（未识别到语音——请确认浏览器允许语音识别，或换 Chrome / Edge；录音仍可回放）');
     rEl.innerHTML =
-      '<div>识别：<span class="ll-rec-recog">' + (transcript ? esc(transcript) : '（未识别到语音——请确认浏览器允许语音识别，或换 Chrome / Edge；录音仍可回放）') + '</span></div>' +
+      '<div>识别：<span class="ll-rec-recog">' + recogText + '</span></div>' +
       '<div>相似度：<span class="ll-rec-score">' + base + '%</span><span class="ll-rec-base">（逐词比对）</span></div>' +
       '<div class="ll-rec-actions">' +
         (audioUrl ? '<button data-act="mine">🔁 我的录音</button>' : '') +
