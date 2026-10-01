@@ -4,7 +4,7 @@
 > 把 **B 站 / YouTube** 视频变成学习材料：逐句字幕列表、跟读录音评分、点词查词、生词本、间隔重复复习、AI 字幕翻译。
 > All data stays in your browser (`chrome.storage.local`) — **no login, no account, nothing uploaded**. 数据全在本地，**无需登录、无账号、不上传**。
 
-**Version v1.0.6** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
+**Version v1.0.7** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
 
 [![Get LingoReel for Chrome](https://img.shields.io/badge/Chrome_Web_Store-Download-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/lingoreel/jghdcidakakmfacgnpmiepeplfgljbmc)
 [![Get LingoReel for Edge](https://img.shields.io/badge/Microsoft_Edge-Download-0078D4?logo=microsoftedge&logoColor=white)](https://microsoftedge.microsoft.com/addons/detail/lingoreel/jfdkckgipihhiebhcgembhpmdoeediio)
@@ -57,6 +57,7 @@ The hard part of learning from foreign-language videos isn't *seeing* subtitles 
 - **Works in real fullscreen** — entering fullscreen temporarily re-parents the panel into the fullscreen element (otherwise the browser paints nothing outside it), auto-switches it to floating mode, and puts it back where it was when you exit.
 - **Two independent opacity sliders** — *background* opacity and *text* opacity are separate, so dimming the background no longer washes out the subtitle text.
 - **Native-language aware** — the "native language / translation target" dropdown decides what subtitles are translated into, and the **panel UI language follows that choice** (built-in 中文 / English / 日本語 / 한국어; other native languages keep the Chinese UI, but translation itself is unrestricted).
+- **Pause toggle = per-page override (1.0.7)** — the panel's "Pause" button and the popup's "Auto-pause" checkbox used to write the *same* stored flag, so a checked global default kept overriding the panel. They're separate now: the popup stays the **starting state for new pages**, while the panel button is a **temporary override for the current page** that never writes back. Turn it off mid-video and it stays off.
 - **Diagnostics** — dumps page structure / subtitle source / fetch details; hit **"Copy report"** to paste into a bug report.
 
 ## Supported sites
@@ -122,7 +123,7 @@ lang-learn-extension/
 
 ## Tests
 
-Self-contained Node tests (no dependencies for most; 3 end-to-end need `jsdom`):
+**19** self-contained Node tests (no dependencies for most; **4** end-to-end need `jsdom`):
 
 | Test | Covers |
 |---|---|
@@ -135,7 +136,7 @@ Self-contained Node tests (no dependencies for most; 3 end-to-end need `jsdom`):
 | `test-yt-bridge.js` | MAIN-world bridge: track forwarding, videoId validation, handshake resend, request interception |
 | `test-css-structure.js` | CSS structural audit (brace balance, dangling commas, empty rules) |
 | `test-sticky-cue.js` | Cue boundary: while paused on `prev.to == next.from` the just-heard line stays locked (▶ and 🎤 must target the same line) |
-| `test-autopause.js` | Auto-pause state machine: arms once, pauses at line end, survives "rolling" ASR captions, refuses expired targets, seek guard, clamps stop to next line's start |
+| `test-autopause.js` | Auto-pause state machine: arms once, pauses at line end, survives "rolling" ASR captions, refuses expired targets, seek guard, clamps stop to next line's start; panel toggle stays a per-page override and never writes back the global default (42 assertions) |
 | `test-progressive-tr.js` | Progressive translation: batch schedule (small first batch, gapless coverage), partial-text → partial track, per-batch screen update, no caching of half-done results |
 | `test-pron-score.js` | Shadowing score: word-level F1 similarity, edit-distance ≤1 tolerance, colour thresholds |
 | `test-translate.js` | AI track: batch chunking, gtx parsing, fallback to per-line when counts mismatch, MyMemory fallback, virtual-track selection & body retrieval, LLM endpoint normalization |
@@ -144,6 +145,7 @@ Self-contained Node tests (no dependencies for most; 3 end-to-end need `jsdom`):
 | `test-llm-dict.js` | (needs `npm i jsdom`) LLM dictionary card (POS / meaning / example) end-to-end |
 | `test-fullscreen.js` | (needs `npm i jsdom`) fullscreen floating window: re-parent into fullscreen, auto-switch, restore on exit; `<video>` fullscreen container fallback |
 | `test-search-cc.js` | Bilibili CC scan: `wbi/view` endpoint, BV-case sensitivity, list-page detection, no old `view` endpoint (43 assertions) |
+| `test-popup-llm.js` | Popup LLM preset switching: Base URL **and** model update together and are persisted atomically — regression lock for the "model changed but URL stayed DeepSeek" bug (needs `jsdom`, 9 assertions) |
 
 ```bash
 # syntax check
@@ -159,12 +161,14 @@ node test-sticky-cue.js
 node test-live-words.js
 node test-search-cc.js
 node test-translate-target.js
+node test-pron-score.js
 # end-to-end (optional dependency)
-npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test-fullscreen.js
+npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test-fullscreen.js && node test-popup-llm.js
 ```
 
 ## Version highlights (selected)
 
+- **v1.0.7** **Two popup/panel control bugs fixed.** ① **Auto-pause couldn't be turned off.** The popup's "Auto-pause" checkbox and the panel's "Pause" button were writing the *same* persisted key, so once you enabled it globally in the popup, "on" kept beating the panel's attempts to switch it off. They're now separate: the popup sets the **starting state for new pages**, and the panel button is a **per-page temporary override** that never writes back — you can always stop auto-pause for the current tab. Diagnostics label the state `(panel override)` so you can tell which one is active. ② **Choosing an LLM preset didn't update the Base URL** — you'd pick another provider yet the URL stayed on DeepSeek. The preset's `change` handler had two listeners: a generic auto-save ran *first* (persisting the **old** values) while `applyPreset` ran later (filling the new ones but never saving). Preset switching is now one atomic step: fill Base URL + model, **then** persist both together.
 - **v1.0.6** **CC scan fully fixed (two fatal bugs).** ① The old `x/web-interface/view` endpoint is now hard rate-limited (412) and returns an HTML challenge page instead of JSON — every `checkCc` parse failed. Switched to the live **`x/web-interface/wbi/view`** endpoint (wbi-signed). ② `extractBvid` wrongly called `.toUpperCase()` on the BV id — but **BV ids are case-sensitive**, so `BV1ujaZ68Ea5` became `BV1UJAZ68EA5` and Bilibili returned `-404` for 105/108 videos. Removed the casing rewrite; the panel now surfaces the failure reason (e.g. `failed K (HTTP 412)` / `code -352`).
 - **v1.0.5** **CC scan was effectively dead.** Added wbi signing + 140 ms throttle + concurrency drop to 3, AI-subtitle-track compatibility, and a live progress + **Retry** button in the CC panel.
 - **v1.0.4** **Native-language translation target.** The skip-translation check no longer hardcodes Chinese — it skips only when the source is already the chosen target language; button/label text is now dynamic (no more mixed Chinese/English). Also added Bilibili homepage `?spm` recommendation feed to the CC scan.
@@ -229,6 +233,7 @@ Released under the [MIT License](LICENSE).
 - **全屏也能浮窗**：进真正全屏时，面板会被临时挂载到全屏元素里（全屏下浏览器只绘制全屏元素及其后代，挂在 body 上的会被整棵裁掉），并自动切成浮窗模式；退出全屏再搬回原处、还原原来的窗口化状态。
 - **两个独立透明度滑块**：「背景透明度」与「文字透明度」分开调，调暗背景不会再把字幕文字一起调糊，二者互不影响；侧边固定面板始终不透明。
 - **母语 / 界面语言**：设置里的「母语 / 译文语言」下拉决定字幕翻译成什么语言，**面板界面文字也跟随母语**（内置中文 / English / 日本語 / 한국어 四套；其它母语界面仍显示中文，译文语言本身不受限）。
+- **「暂停」开关 = 本页临时覆盖（1.0.7）**：面板上的「暂停」按钮和弹窗里的「自动暂停」复选框，此前写的是**同一个存储键**——只要在弹窗里勾了全局默认，「开」就会反复压过面板的关闭操作，感觉像面板失控。现在两者分离：弹窗里的仍是**新页面的起始状态**，面板按钮则是**只影响当前页的临时覆盖**、不会写回全局。视频中途关掉就一直关着。
 - **诊断面板**：一键导出页面结构 / 字幕来源 / 抓取详情，出问题时点一下「复制报告」即可反馈定位。
 
 ## 支持的网站
@@ -323,7 +328,7 @@ lang-learn-extension/
 
 ## 测试
 
-仓库自带一套 Node 测试（多数零依赖，3 个端到端需 `jsdom`），覆盖最容易出错的几处逻辑：
+仓库自带 **19** 个 Node 测试（多数零依赖，**4** 个端到端需 `jsdom`），覆盖最容易出错的几处逻辑：
 
 | 测试 | 覆盖内容 |
 |---|---|
@@ -336,7 +341,7 @@ lang-learn-extension/
 | `test-yt-bridge.js` | 主世界桥接：轨道转发、videoId 校验、握手重发、请求截获 |
 | `test-css-structure.js` | CSS 结构体检（括号配平、悬挂逗号、空规则） |
 | `test-sticky-cue.js` | 句边界锁行：暂停在「上一句 to == 下一句 from」上时，刚听完的那句保持锁定（▶ 与 🎤 必须指向同一句） |
-| `test-autopause.js` | 自动暂停状态机：目标只武装一次、播到句尾停住、能扛住"滚动式 ASR 字幕"、拒绝过期目标、seek 保护期、停止点收紧到下一句起点 |
+| `test-autopause.js` | 自动暂停状态机：目标只武装一次、播到句尾停住、能扛住"滚动式 ASR 字幕"、拒绝过期目标、seek 保护期、停止点收紧到下一句起点；面板开关为本页临时覆盖、不回写全局默认（42 断言） |
 | `test-progressive-tr.js` | 渐进式翻译：分块调度（首块小、不重不漏）、半截译文只上屏已译行、逐块上屏的流式契约、半截结果不写缓存 |
 | `test-pron-score.js` | 跟读打分：逐词 F1 相似度、编辑距离 ≤1 容错、颜色分级阈值 |
 | `test-translate.js` | AI 译文轨道：批量分组、gtx 解析、条数不符降级逐条、MyMemory 回退、虚拟轨道挑选与取正文 |
@@ -345,6 +350,7 @@ lang-learn-extension/
 | `test-llm-dict.js` | （需 `npm i jsdom`）大模型词典卡片（词性/释义/例句）端到端 |
 | `test-fullscreen.js` | （需 `npm i jsdom`）全屏浮窗：进全屏改挂到全屏容器、自动切浮窗、退出还原；`<video>` 全屏的换容器补救 |
 | `test-search-cc.js` | B 站 CC 扫描：走 `wbi/view` 端点、BV 大小写敏感、列表页判定、不再调老 `view` 端点（43 断言） |
+| `test-popup-llm.js` | 弹窗大模型预设切换：切预设时 Base URL 与模型名一起更新并一起存盘——锁死"模型改了但网址还是 DeepSeek"的回归（需 `jsdom`，9 断言） |
 
 ```bash
 # 语法检查
@@ -360,12 +366,14 @@ node test-sticky-cue.js
 node test-live-words.js
 node test-search-cc.js
 node test-translate-target.js
+node test-pron-score.js
 # 端到端（可选依赖）
-npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test-fullscreen.js
+npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test-fullscreen.js && node test-popup-llm.js
 ```
 
 ## 主要版本历程（节选）
 
+- **v1.0.7** **修好两处「设置 / 面板互相打架」的控制问题。** ① **自动暂停关不掉**：弹窗里的「自动暂停」复选框与面板上的「暂停」按钮此前写的是**同一个持久化键**，一旦在弹窗勾了全局默认，「开」就会持续压过面板的关闭动作，体感就是"面板不受控"。现改为分离：弹窗负责**新页面的起始状态**，面板按钮是**只影响当前页的临时覆盖**、不再回写全局——视频中途关掉就一直关着；诊断里会标注「（面板覆盖）」便于分辨当前是哪个在生效。② **选大模型预设时网址不跟着变**：模型选了别家、Base URL 还停在 DeepSeek。根因是预设下拉的 `change` 上挂了两个监听器——通用自动保存**先跑**（把**旧**的 base/model 存盘），`applyPreset` **后跑**（填入新值却不再保存），导致预设填好的网址从未持久化、重开弹窗又被旧值覆盖。现在改成一步原子操作：先填 Base URL 与模型名，**再**一起存盘。
 - **v1.0.6** **CC 扫描彻底修好（两处致命 bug）。** ① 老 `x/web-interface/view` 端点现已被 B 站整体 412 风控、返回 HTML 挑战页而非 JSON，导致每条 `checkCc` 解析全挂；改用活端点 **`x/web-interface/wbi/view`**（带 wbi 签名）。② `extractBvid` 误把 BV 号 `.toUpperCase()`——但 **BV 号大小写敏感**，`BV1ujaZ68Ea5` 被改成 `BV1UJAZ68EA5` 后 B 站对 108 个里 105 个返回 `-404`。去掉大小写改写；面板现在会把失败原因透出（如 `失败 K（HTTP 412）` / `code -352`）。
 - **v1.0.5** **CC 扫描此前基本失效**：给 view 加 wbi 签名 + 140ms 节流 + 并发降到 3，兼容 AI 字幕轨道结构，面板加实时进度与「重测」按钮。
 - **v1.0.4** **翻译目标语言跟随母语**：跳过翻译的判定不再写死中文，只有"源已是所选目标语言"才跳过；按钮/标签改为动态拼接（不再中英文混杂）。另把 B 站首页 `?spm` 推荐流纳入 CC 扫描。
