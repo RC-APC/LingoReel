@@ -1130,7 +1130,7 @@
   // 点词走大模型：后台 dictLlm 返回结构化释义卡片
   function lookupLlmAndShow(span, word) {
     const context = wordContextOf(span);
-    chrome.runtime.sendMessage({ type: 'dictLlm', word: word, context: context, tl: translateTarget }, (resp) => {
+    sendToBackground({ type: 'dictLlm', word: word, context: context, tl: translateTarget }).then((resp) => {
       removePopup();
       const pop = document.createElement('div');
       pop.id = 'll-popup';
@@ -1157,10 +1157,9 @@
       try {
         let cached = llmDefCache[word.toLowerCase()];
         if (!cached || !cached.ok) {
-          cached = await new Promise((res) => chrome.runtime.sendMessage(
-            { type: 'dictLlm', word: word, context: wordContextOf(span), tl: translateTarget },
-            (r) => res(r || { ok: false })
-          ));
+          cached = await sendToBackground(
+            { type: 'dictLlm', word: word, context: wordContextOf(span), tl: translateTarget }
+          );
         }
         if (cached && cached.ok) {
           note = String(cached.def || cached.text || '').trim();
@@ -2294,6 +2293,53 @@
     setStatus('已生成「' + langDocName(translateTarget) + '（AI 翻译）」轨道（' + n + ' 行 / ' + engine + '）。已自动设为对照轨道：窗口化浮窗里原文下方叠' + langDocName(translateTarget) + '；也可在主轨道下拉里选它只看译文。');
   }
 
+  // MV3 服务工作者「唤醒竞态」兜底：后台 SW 休眠时，来自 content script 的第一条
+  // chrome.runtime.sendMessage 可能在监听器注册完成前就发出，Chrome 报
+  // "Could not establish connection. Receiving end does not exist."。
+  // 这里对这类连接错误（以及 SW 处理中途被系统中断）做有限次退避重试，给 SW 留出
+  // 唤醒/重启时间；单条消息整体也带超时，避免 SW 崩溃时 Promise 永远挂起。
+  function sendToBackground(msg, retries, timeoutMs) {
+    retries = (typeof retries === 'number' && retries >= 0) ? retries : 3;
+    timeoutMs = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 30000;
+    return new Promise((resolve) => {
+      let done = false;
+      let attempt = 0;
+      const finish = (val) => { if (!done) { done = true; resolve(val); } };
+      const tryOnce = () => {
+        attempt++;
+        let cancelled = false;
+        const timer = setTimeout(() => {
+          if (cancelled || done) return;
+          cancelled = true;
+          if (attempt <= retries) { setTimeout(tryOnce, 150 * attempt); return; }
+          finish({ ok: false, error: '后台响应超时（可能服务工作者被系统中断，重试后仍失败）' });
+        }, timeoutMs);
+        try {
+          chrome.runtime.sendMessage(msg, (r) => {
+            if (cancelled || done) return;
+            clearTimeout(timer);
+            const err = (chrome.runtime && chrome.runtime.lastError) || null;
+            if (err) {
+              const text = (err.message || '') + '';
+              if (attempt <= retries && /Receiving end|Could not establish connection|background page has crashed/i.test(text)) {
+                setTimeout(tryOnce, 150 * attempt);
+                return;
+              }
+              finish({ ok: false, error: text || '后台无响应' });
+            } else {
+              finish(r || { ok: false, error: '后台无响应' });
+            }
+          });
+        } catch (e) {
+          clearTimeout(timer);
+          if (attempt <= retries) { setTimeout(tryOnce, 150 * attempt); return; }
+          finish({ ok: false, error: String(e) });
+        }
+      };
+      tryOnce();
+    });
+  }
+
   async function startTranslation(srcIdx, opts) {
     opts = opts || {};
     if (trRunning) return;
@@ -2333,17 +2379,9 @@
       if (trAbort || gen !== trGen) break;
       const slice = work.slice(plan[bi].start, plan[bi].end);
       const texts = slice.map((i) => src[i]);
-      const res = await new Promise((resolve) => {
-        try {
-          chrome.runtime.sendMessage(
-            { type: 'translateBatch', texts: texts, sl: srcLangOf(srcIdx), tl: translateTarget, engine: trEngine },
-            (r) => {
-              if (chrome.runtime && chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
-              else resolve(r || { ok: false, error: '后台无响应' });
-            }
-          );
-        } catch (e) { resolve({ ok: false, error: String(e) }); }
-      });
+      const res = await sendToBackground(
+        { type: 'translateBatch', texts: texts, sl: srcLangOf(srcIdx), tl: translateTarget, engine: trEngine }
+      );
       if (!res || !res.ok) { fatal = (res && res.error) || '未知错误'; break; }
       if (res.engine) realEngine = res.engine;         // 后台实际用的是哪个（可能被回退了）
       if (res.note && notes.indexOf(res.note) < 0) notes.push(res.note);
