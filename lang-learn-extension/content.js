@@ -1337,7 +1337,7 @@
           const item = Array.from(box.querySelectorAll('.ll-vocab-item')).find((it) => it.dataset.w === w);
           const el = item && item.querySelector('.ll-vocab-def');
           if (el) { el.textContent = '联网查词中…'; el.className = 'll-vocab-def'; }
-          chrome.runtime.sendMessage({ type: 'lookup', word: w }, (resp) => {
+          sendToBackgroundCb({ type: 'lookup', word: w }, (resp) => {
             if (!el) return;
             if (resp && resp.ok && resp.meanings && resp.meanings.length) {
               el.className = 'll-vocab-def ll-vocab-def-hit';
@@ -1358,7 +1358,7 @@
       box.querySelectorAll('.ll-vocab-def').forEach((el) => { el.textContent = '（无法读取本地词库）'; });
       return;
     }
-    chrome.runtime.sendMessage({ type: 'dictLookupBatch', words: words }, (resp) => {
+    sendToBackgroundCb({ type: 'dictLookupBatch', words: words }, (resp) => {
       if (!resp || !resp.ok) {
         box.querySelectorAll('.ll-vocab-def').forEach((el) => { el.textContent = '（本地词库不可用，可点 🔍 联网查）'; });
         return;
@@ -1473,7 +1473,7 @@
       dict[key] = { def: def.trim(), pos: (pos || '').trim() };
       chrome.storage.local.set({ userDict: dict }, () => {
         showToast('已保存到本地词库：' + word);
-        chrome.runtime.sendMessage({ type: 'lookup', word: word }, (resp) => showDefResult('ll-rev-def', resp));
+        sendToBackgroundCb({ type: 'lookup', word: word }, (resp) => showDefResult('ll-rev-def', resp));
       });
     });
   }
@@ -1536,7 +1536,7 @@
           if (addLocalBtn) { addLocalBtn.style.display = 'inline-block'; addLocalBtn.onclick = () => addLocalDef(item.word); }
           const meansEnglish = /^[A-Za-z]/.test(item.word);
           if (meansEnglish) {
-            chrome.runtime.sendMessage({ type: 'lookup', word: item.word }, (resp) => {
+            sendToBackgroundCb({ type: 'lookup', word: item.word }, (resp) => {
               showDefResult('ll-rev-def', resp);
             });
           } else {
@@ -1851,7 +1851,7 @@
   }
 
   function lookupAndShow(span, word) {
-    chrome.runtime.sendMessage({ type: 'lookup', word: word }, (resp) => {
+    sendToBackgroundCb({ type: 'lookup', word: word }, (resp) => {
       removePopup();
       const pop = document.createElement('div');
       pop.id = 'll-popup';
@@ -2293,51 +2293,101 @@
     setStatus('已生成「' + langDocName(translateTarget) + '（AI 翻译）」轨道（' + n + ' 行 / ' + engine + '）。已自动设为对照轨道：窗口化浮窗里原文下方叠' + langDocName(translateTarget) + '；也可在主轨道下拉里选它只看译文。');
   }
 
-  // MV3 服务工作者「唤醒竞态」兜底：后台 SW 休眠时，来自 content script 的第一条
-  // chrome.runtime.sendMessage 可能在监听器注册完成前就发出，Chrome 报
-  // "Could not establish connection. Receiving end does not exist."。
-  // 这里对这类连接错误（以及 SW 处理中途被系统中断）做有限次退避重试，给 SW 留出
-  // 唤醒/重启时间；单条消息整体也带超时，避免 SW 崩溃时 Promise 永远挂起。
+  // —— MV3 稳健通信层 ——
+  // 根因：MV3 后台是 service worker，① 空闲会被休眠，第一条 sendMessage 可能在监听器注册前
+  // 发出 →「无接收方」；②「重载扩展」不会重新注入已打开标签页里的 content script，旧脚本的
+  // chrome.runtime 被置为失效，每条消息都永久报 "Could not establish connection. Receiving
+  // end does not exist."，重试也救不了（必须刷新页面）。
+  // 方案：content script 启动时用 chrome.runtime.connect 建一条长连接端口——connect 会先唤醒
+  // SW 并触发 onConnect，端口建立即代表监听器已就绪，之后所有请求走端口，彻底绕开「首条消息
+  // 无接收方」竞态；端口断开（SW 休眠/崩溃/扩展重载）自动重连；上下文失效时提示刷新页面。
+  let lrPort = null;
+  let lrPortReady = false;
+  let lrReqSeq = 0;
+  const lrPending = new Map();   // reqId -> { resolve, timer }
+
+  function lrConnect() {
+    try {
+      lrPort = chrome.runtime.connect({ name: 'lingoreel' });
+    } catch (e) {
+      lrPort = null;
+      if (/Extension context invalidated/i.test(String(e && e.message || e))) {
+        showToast('扩展已更新，请刷新此页面（Ctrl/Cmd+R）以重新加载脚本');
+      }
+      return;
+    }
+    lrPort.onMessage.addListener((data) => {
+      if (!data || data.reqId == null) return;
+      const p = lrPending.get(data.reqId);
+      if (!p) return;
+      clearTimeout(p.timer);
+      lrPending.delete(data.reqId);
+      try { p.resolve(data.response); } catch (_) {}
+    });
+    lrPort.onDisconnect.addListener(() => {
+      const err = (chrome.runtime && chrome.runtime.lastError && chrome.runtime.lastError.message) || '';
+      lrPort = null;
+      lrPortReady = false;
+      if (/Extension context invalidated/i.test(err)) {
+        showToast('扩展已更新，请刷新此页面（Ctrl/Cmd+R）以重新加载脚本');
+        return;
+      }
+      // SW 休眠/崩溃：让挂起请求以「正在重连」结束（调用方会按 ok:false 处理），并尝试重连
+      lrPending.forEach((p) => { try { p.resolve({ ok: false, error: '后台连接断开，正在重连…' }); } catch (_) {} });
+      lrPending.clear();
+      setTimeout(lrConnect, 400);
+    });
+    lrPortReady = true;
+  }
+
   function sendToBackground(msg, retries, timeoutMs) {
     retries = (typeof retries === 'number' && retries >= 0) ? retries : 3;
     timeoutMs = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 30000;
     return new Promise((resolve) => {
-      let done = false;
       let attempt = 0;
-      const finish = (val) => { if (!done) { done = true; resolve(val); } };
       const tryOnce = () => {
         attempt++;
-        let cancelled = false;
+        const reqId = ++lrReqSeq;
         const timer = setTimeout(() => {
-          if (cancelled || done) return;
-          cancelled = true;
-          if (attempt <= retries) { setTimeout(tryOnce, 150 * attempt); return; }
-          finish({ ok: false, error: '后台响应超时（可能服务工作者被系统中断，重试后仍失败）' });
+          lrPending.delete(reqId);
+          if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; }
+          resolve({ ok: false, error: '后台响应超时（服务工作者可能已被系统中断）' });
         }, timeoutMs);
-        try {
+        if (lrPort && lrPortReady) {
+          lrPending.set(reqId, { resolve, timer });
+          try { lrPort.postMessage({ msg, reqId }); }
+          catch (e) {
+            lrPending.delete(reqId); clearTimeout(timer);
+            if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; }
+            resolve({ ok: false, error: String(e) });
+          }
+        } else {
+          // 端口未就绪（极早阶段 / 重连中）：降级到 sendMessage 并带连接错误重试
           chrome.runtime.sendMessage(msg, (r) => {
-            if (cancelled || done) return;
             clearTimeout(timer);
             const err = (chrome.runtime && chrome.runtime.lastError) || null;
             if (err) {
               const text = (err.message || '') + '';
-              if (attempt <= retries && /Receiving end|Could not establish connection|background page has crashed/i.test(text)) {
-                setTimeout(tryOnce, 150 * attempt);
-                return;
+              if (attempt <= retries && /Receiving end|Could not establish connection|background page has crashed|Extension context invalidated/i.test(text)) {
+                if (!lrPort) lrConnect();
+                setTimeout(tryOnce, 200 * attempt); return;
               }
-              finish({ ok: false, error: text || '后台无响应' });
+              resolve({ ok: false, error: text || '后台无响应' });
             } else {
-              finish(r || { ok: false, error: '后台无响应' });
+              resolve(r || { ok: false, error: '后台无响应' });
             }
           });
-        } catch (e) {
-          clearTimeout(timer);
-          if (attempt <= retries) { setTimeout(tryOnce, 150 * attempt); return; }
-          finish({ ok: false, error: String(e) });
         }
       };
       tryOnce();
     });
+  }
+
+  // 回调式封装：兼容原有 sendMessage(type, cb) 调用
+  function sendToBackgroundCb(msg, cb) {
+    sendToBackground(msg)
+      .then((r) => { try { cb && cb(r); } catch (e) {} })
+      .catch(() => { try { cb && cb({ ok: false, error: '发送失败' }); } catch (e) {} });
   }
 
   async function startTranslation(srcIdx, opts) {
@@ -3346,6 +3396,7 @@
 
   async function init() {
     // 每一步都独立 try/catch：任何一处出错都不能阻止面板出现
+    try { lrConnect(); } catch (e) { log('lrConnect 失败', e); }
     try { await getSettings(); } catch (e) { log('getSettings 失败', e); }
     try { currentSite = detectSite(); } catch (e) { log('detectSite 失败', e); }
     if (!settings.enabled) { log('disabled'); return; }

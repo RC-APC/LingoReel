@@ -14,7 +14,7 @@ const ctx = {
   AbortController,
   fetch: () => Promise.reject(new Error('测试中不应发起网络请求')),
   chrome: {
-    runtime: { onMessage: { addListener: () => {} } },
+    runtime: { onMessage: { addListener: () => {} }, onConnect: { addListener: () => {} } },
     storage: { local: { get: (d, cb) => cb(d), set: (o, cb) => cb && cb() } }
   }
 };

@@ -551,71 +551,81 @@ async function lookupWord(word) {
   return { ok: false, notFound: true, word, error: '所有词典源均未收录该词：本地词库没有、在线词典也拉不到。可点「✎ 存本地释义」手动补充。' };
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'lookup') {
-    lookupWord(msg.word)
-      .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ ok: false, error: String(e) }));
-    return true; // 异步响应
-  }
-  // 点词用大模型查释义（需要用户在设置里配好大模型 API）。带语境句，译文语言 = tl。
-  if (msg.type === 'dictLlm') {
-    (async () => {
+// 统一消息处理：onMessage 与 onConnect 端口共用，避免两套逻辑
+async function handleMessage(msg) {
+  if (!msg || !msg.type) return { ok: false, error: '空消息' };
+  switch (msg.type) {
+    case 'lookup':
+      return await lookupWord(msg.word);
+    // 点词用大模型查释义（需要用户在设置里配好大模型 API）。带语境句，译文语言 = tl。
+    case 'dictLlm': {
       const cfg = await getLlmConfig();
       if (!llmReady(cfg)) {
-        sendResponse({ ok: false, error: '未配置大模型：请到插件设置打开「用大模型 API 翻译」并填好地址 / 模型 / Key' });
-        return;
+        return { ok: false, error: '未配置大模型：请到插件设置打开「用大模型 API 翻译」并填好地址 / 模型 / Key' };
       }
       try {
-        const r = await llmDefineWord(String(msg.word || '').trim(), msg.context || '', msg.tl || 'zh-CN', cfg);
-        sendResponse(r);
+        return await llmDefineWord(String(msg.word || '').trim(), msg.context || '', msg.tl || 'zh-CN', cfg);
       } catch (e) {
-        sendResponse({ ok: false, error: String((e && e.message) || e) });
+        return { ok: false, error: String((e && e.message) || e) };
       }
-    })();
-    return true;
-  }
-  // 纯本地词库查询（不走网络）：用于生词本列表「主动显示释义」
-  if (msg.type === 'dictLookupBatch') {
-    chrome.storage.local.get({ userDict: {} }, (r) => {
+    }
+    // 纯本地词库查询（不走网络）：用于生词本列表「主动显示释义」
+    case 'dictLookupBatch': {
+      const r = await new Promise((res) => chrome.storage.local.get({ userDict: {} }, (x) => res(x)));
       const dict = r.userDict || {};
       const out = {};
       (msg.words || []).forEach((w) => {
         const hit = dictLookup(dict, w);
         if (hit) out[w] = hit;
       });
-      sendResponse({ ok: true, map: out, dictSize: Object.keys(dict).length });
-    });
-    return true;
-  }
-  // 字幕整批翻译（免费引擎，无需 Key）。走后台是为了避开页面 CORS 限制。
-  if (msg.type === 'translateBatch') {
-    translateBatch(msg.texts || [], msg.sl || '', msg.tl || 'zh-CN', msg.engine || 'auto')
-      .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ ok: false, error: String(e) }));
-    return true;
-  }
-  // 大模型接口连通性测试：翻一句短句，验证 base_url / model / key 三件套是否对得上
-  if (msg.type === 'testLlm') {
-    (async () => {
+      return { ok: true, map: out, dictSize: Object.keys(dict).length };
+    }
+    // 字幕整批翻译（免费引擎，无需 Key）。走后台是为了避开页面 CORS 限制。
+    case 'translateBatch':
+      return await translateBatch(msg.texts || [], msg.sl || '', msg.tl || 'zh-CN', msg.engine || 'auto');
+    // 大模型接口连通性测试：翻一句短句，验证 base_url / model / key 三件套是否对得上
+    case 'testLlm': {
       const cfg = { apiKey: msg.apiKey, baseUrl: msg.baseUrl, model: msg.model };
       const miss = ['apiKey', 'baseUrl', 'model'].filter((k) => !cfg[k]);
-      if (miss.length) { sendResponse({ ok: false, error: '还没填：' + miss.join(' / ') }); return; }
+      if (miss.length) return { ok: false, error: '还没填：' + miss.join(' / ') };
       try {
         const out = await llmTranslateBatch(['Good morning, everyone.'], 'en', msg.tl || 'zh-CN', cfg);
         const t = String((out.results && out.results[0]) || '').trim();
-        if (!t) { sendResponse({ ok: false, error: '接口通了但没返回译文，请检查模型名是否正确' }); return; }
-        sendResponse({ ok: true, text: t, model: cfg.model, endpoint: llmEndpointCandidates(cfg.baseUrl)[0] });
+        if (!t) return { ok: false, error: '接口通了但没返回译文，请检查模型名是否正确' };
+        return { ok: true, text: t, model: cfg.model, endpoint: llmEndpointCandidates(cfg.baseUrl)[0] };
       } catch (e) {
-        sendResponse({ ok: false, error: String((e && e.message) || e) });
+        return { ok: false, error: String((e && e.message) || e) };
       }
-    })();
-    return true;
+    }
+    case 'dictLookupOne': {
+      const r = await new Promise((res) => chrome.storage.local.get({ userDict: {} }, (x) => res(x)));
+      return { ok: true, hit: dictLookup(r.userDict || {}, msg.word) };
+    }
+    default:
+      return { ok: false, error: '未知消息类型：' + msg.type };
   }
-  if (msg.type === 'dictLookupOne') {
-    chrome.storage.local.get({ userDict: {} }, (r) => {
-      sendResponse({ ok: true, hit: dictLookup(r.userDict || {}, msg.word) });
-    });
-    return true;
-  }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  handleMessage(msg)
+    .then((r) => sendResponse(r))
+    .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+  return true; // 异步响应
+});
+
+// 持久端口：content / 扩展页通过 connect 建长连接，规避 MV3 后台 SW 冷启动竞态
+// connect 会先唤醒 SW 并触发 onConnect，端口建立后才收发消息，首条消息不再「无接收方」
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'lingoreel') return;
+  port.onMessage.addListener(async (data) => {
+    const msg = data && data.msg;
+    const reqId = data && data.reqId;
+    let response;
+    try {
+      response = await handleMessage(msg);
+    } catch (e) {
+      response = { ok: false, error: String(e && e.message || e) };
+    }
+    try { port.postMessage({ reqId, response }); } catch (_) {}
+  });
 });

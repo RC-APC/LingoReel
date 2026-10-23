@@ -2,6 +2,61 @@
 
 const $ = (id) => document.getElementById(id);
 
+// MV3 稳健通信层（与 content.js / vocab.js 同方案：长连接端口规避 SW 冷启动竞态）
+let lrPort = null, lrPortReady = false, lrReqSeq = 0;
+const lrPending = new Map();
+(function lrConnect() {
+  try { lrPort = chrome.runtime.connect({ name: 'lingoreel' }); }
+  catch (e) { lrPort = null; if (/Extension context invalidated/i.test(String(e))) console.warn('[LingoReel] 扩展已更新，请刷新本弹窗'); return; }
+  lrPort.onMessage.addListener((data) => {
+    if (!data || data.reqId == null) return;
+    const p = lrPending.get(data.reqId); if (!p) return;
+    clearTimeout(p.timer); lrPending.delete(data.reqId);
+    try { p.resolve(data.response); } catch (_) {}
+  });
+  lrPort.onDisconnect.addListener(() => {
+    const err = (chrome.runtime && chrome.runtime.lastError && chrome.runtime.lastError.message) || '';
+    lrPort = null; lrPortReady = false;
+    if (/Extension context invalidated/i.test(err)) { console.warn('[LingoReel] 扩展已更新，请刷新本弹窗'); return; }
+    lrPending.forEach((p) => { try { p.resolve({ ok: false, error: '后台连接断开，正在重连…' }); } catch (_) {} });
+    lrPending.clear();
+    setTimeout(lrConnect, 400);
+  });
+  lrPortReady = true;
+})();
+function sendToBackground(msg, retries, timeoutMs) {
+  retries = (typeof retries === 'number' && retries >= 0) ? retries : 3;
+  timeoutMs = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 30000;
+  return new Promise((resolve) => {
+    let attempt = 0;
+    const tryOnce = () => {
+      attempt++;
+      const reqId = ++lrReqSeq;
+      const timer = setTimeout(() => {
+        lrPending.delete(reqId);
+        if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; }
+        resolve({ ok: false, error: '后台响应超时（服务工作者可能已被系统中断）' });
+      }, timeoutMs);
+      if (lrPort && lrPortReady) {
+        lrPending.set(reqId, { resolve, timer });
+        try { lrPort.postMessage({ msg, reqId }); }
+        catch (e) { lrPending.delete(reqId); clearTimeout(timer); if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; } resolve({ ok: false, error: String(e) }); }
+      } else {
+        chrome.runtime.sendMessage(msg, (r) => {
+          clearTimeout(timer);
+          const err = (chrome.runtime && chrome.runtime.lastError) || null;
+          if (err) {
+            const text = (err.message || '') + '';
+            if (attempt <= retries && /Receiving end|Could not establish connection|background page has crashed|Extension context invalidated/i.test(text)) { if (!lrPort) lrConnect(); setTimeout(tryOnce, 200 * attempt); return; }
+            resolve({ ok: false, error: text || '后台无响应' });
+          } else { resolve(r || { ok: false, error: '后台无响应' }); }
+        });
+      }
+    };
+    tryOnce();
+  });
+}
+
 function toggleEudicHint() {
   const box = $('eudicBox');
   if (box) box.classList.toggle('show', $('dictSource').value === 'eudic');
@@ -144,21 +199,16 @@ function testLlm() {
       showLlmResult('err', '❌ 域名未授权，浏览器会拦掉请求。重试点「测试连接」并在弹窗里选「允许」。');
       return;
     }
-    chrome.runtime.sendMessage(
-      { type: 'testLlm', baseUrl: baseUrl, model: model, apiKey: apiKey, tl: $('translateTarget').value },
-      (res) => {
-        btn.disabled = false; btn.textContent = '测试连接';
-        if (!res || chrome.runtime.lastError) {
-          showLlmResult('err', '❌ 后台无响应：' + ((chrome.runtime && chrome.runtime.lastError && chrome.runtime.lastError.message) || '未知'));
-          return;
-        }
-        if (res.ok) {
-          showLlmResult('ok', '✅ 通了！「Good morning, everyone.」→ 「' + escapeHtml(res.text) + '」');
-        } else {
-          showLlmResult('err', '❌ ' + escapeHtml(res.error || '失败') + '<br>对照：401/403=Key 错；404=地址或模型名错；429=限流/额度用尽。');
-        }
+    sendToBackground(
+      { type: 'testLlm', baseUrl: baseUrl, model: model, apiKey: apiKey, tl: $('translateTarget').value }
+    ).then((res) => {
+      btn.disabled = false; btn.textContent = '测试连接';
+      if (!res || !res.ok) {
+        showLlmResult('err', '❌ ' + escapeHtml((res && res.error) || '后台无响应') + '<br>对照：401/403=Key 错；404=地址或模型名错；429=限流/额度用尽；若提示「连接断开」请重试。');
+        return;
       }
-    );
+      showLlmResult('ok', '✅ 通了！「Good morning, everyone.」→ 「' + escapeHtml(res.text) + '」');
+    });
   });
 }
 

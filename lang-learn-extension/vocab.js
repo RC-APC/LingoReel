@@ -13,6 +13,65 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  // —— MV3 稳健通信层（与 content.js 同方案：长连接端口规避 SW 冷启动竞态）——
+  let lrPort = null, lrPortReady = false, lrReqSeq = 0;
+  const lrPending = new Map();
+  function lrConnect() {
+    try { lrPort = chrome.runtime.connect({ name: 'lingoreel' }); }
+    catch (e) { lrPort = null; if (/Extension context invalidated/i.test(String(e))) console.warn('[LingoReel] 扩展已更新，请刷新此页面'); return; }
+    lrPort.onMessage.addListener((data) => {
+      if (!data || data.reqId == null) return;
+      const p = lrPending.get(data.reqId); if (!p) return;
+      clearTimeout(p.timer); lrPending.delete(data.reqId);
+      try { p.resolve(data.response); } catch (_) {}
+    });
+    lrPort.onDisconnect.addListener(() => {
+      const err = (chrome.runtime && chrome.runtime.lastError && chrome.runtime.lastError.message) || '';
+      lrPort = null; lrPortReady = false;
+      if (/Extension context invalidated/i.test(err)) { console.warn('[LingoReel] 扩展已更新，请刷新此页面'); return; }
+      lrPending.forEach((p) => { try { p.resolve({ ok: false, error: '后台连接断开，正在重连…' }); } catch (_) {} });
+      lrPending.clear();
+      setTimeout(lrConnect, 400);
+    });
+    lrPortReady = true;
+  }
+  function sendToBackground(msg, retries, timeoutMs) {
+    retries = (typeof retries === 'number' && retries >= 0) ? retries : 3;
+    timeoutMs = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 30000;
+    return new Promise((resolve) => {
+      let attempt = 0;
+      const tryOnce = () => {
+        attempt++;
+        const reqId = ++lrReqSeq;
+        const timer = setTimeout(() => {
+          lrPending.delete(reqId);
+          if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; }
+          resolve({ ok: false, error: '后台响应超时（服务工作者可能已被系统中断）' });
+        }, timeoutMs);
+        if (lrPort && lrPortReady) {
+          lrPending.set(reqId, { resolve, timer });
+          try { lrPort.postMessage({ msg, reqId }); }
+          catch (e) { lrPending.delete(reqId); clearTimeout(timer); if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; } resolve({ ok: false, error: String(e) }); }
+        } else {
+          chrome.runtime.sendMessage(msg, (r) => {
+            clearTimeout(timer);
+            const err = (chrome.runtime && chrome.runtime.lastError) || null;
+            if (err) {
+              const text = (err.message || '') + '';
+              if (attempt <= retries && /Receiving end|Could not establish connection|background page has crashed|Extension context invalidated/i.test(text)) { if (!lrPort) lrConnect(); setTimeout(tryOnce, 200 * attempt); return; }
+              resolve({ ok: false, error: text || '后台无响应' });
+            } else { resolve(r || { ok: false, error: '后台无响应' }); }
+          });
+        }
+      };
+      tryOnce();
+    });
+  }
+  function sendToBackgroundCb(msg, cb) {
+    sendToBackground(msg).then((r) => { try { cb && cb(r); } catch (e) {} }).catch(() => { try { cb && cb({ ok: false, error: '发送失败' }); } catch (e) {} });
+  }
+  lrConnect();
+
   const $ = (id) => document.getElementById(id);
   let vocab = [];
 
@@ -84,7 +143,7 @@
       els.forEach((el) => { el.textContent = '（无法读取本地词库）'; });
       return;
     }
-    chrome.runtime.sendMessage({ type: 'dictLookupBatch', words: words }, (resp) => {
+    sendToBackgroundCb({ type: 'dictLookupBatch', words: words }, (resp) => {
       if (!resp || !resp.ok) {
         els.forEach((el) => { el.textContent = '（本地词库不可用，可点「🔍 联网查」）'; });
         return;
@@ -122,10 +181,10 @@
       chrome.storage.sync.get({ translateTarget: 'zh-CN', dictSource: 'api' }, (cfg) => {
         const tl = cfg.translateTarget || 'zh-CN';
         const doLlm = () => new Promise((res) => {
-          chrome.runtime.sendMessage({ type: 'dictLlm', word: v.word, tl: tl }, (r) => res(r && r.ok ? r : null));
+          sendToBackgroundCb({ type: 'dictLlm', word: v.word, tl: tl }, (r) => res(r && r.ok ? r : null));
         });
         const doOnline = () => new Promise((res) => {
-          chrome.runtime.sendMessage({ type: 'lookup', word: v.word }, (r) =>
+          sendToBackgroundCb({ type: 'lookup', word: v.word }, (r) =>
             res((r && r.ok && r.meanings && r.meanings.length) ? r : null));
         });
         (async () => {
@@ -227,7 +286,7 @@
         alert('已保存到本地词库：' + word);
         renderDict();
         // 刷新当前卡片释义（现在会命中本地词库）
-        chrome.runtime.sendMessage({ type: 'lookup', word: word }, (resp) => showDefResult('rev-def', resp));
+        sendToBackgroundCb({ type: 'lookup', word: word }, (resp) => showDefResult('rev-def', resp));
       });
     });
   }
@@ -299,7 +358,7 @@
 
       const meansEnglish = /^[A-Za-z]/.test(item.word);
       if (meansEnglish) {
-        chrome.runtime.sendMessage({ type: 'lookup', word: item.word }, (resp) => {
+        sendToBackgroundCb({ type: 'lookup', word: item.word }, (resp) => {
           showDefResult('rev-def', resp);
         });
       } else {
