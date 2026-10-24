@@ -2297,86 +2297,58 @@
   // 根因：MV3 后台是 service worker，① 空闲会被休眠，第一条 sendMessage 可能在监听器注册前
   // 发出 →「无接收方」；②「重载扩展」不会重新注入已打开标签页里的 content script，旧脚本的
   // chrome.runtime 被置为失效，每条消息都永久报 "Could not establish connection. Receiving
-  // end does not exist."，重试也救不了（必须刷新页面）。
-  // 方案：content script 启动时用 chrome.runtime.connect 建一条长连接端口——connect 会先唤醒
-  // SW 并触发 onConnect，端口建立即代表监听器已就绪，之后所有请求走端口，彻底绕开「首条消息
-  // 无接收方」竞态；端口断开（SW 休眠/崩溃/扩展重载）自动重连；上下文失效时提示刷新页面。
-  let lrPort = null;
-  let lrPortReady = false;
-  let lrReqSeq = 0;
-  const lrPending = new Map();   // reqId -> { resolve, timer }
-
-  function lrConnect() {
-    try {
-      lrPort = chrome.runtime.connect({ name: 'lingoreel' });
-    } catch (e) {
-      lrPort = null;
-      if (/Extension context invalidated/i.test(String(e && e.message || e))) {
-        showToast('扩展已更新，请刷新此页面（Ctrl/Cmd+R）以重新加载脚本');
-      }
-      return;
-    }
-    lrPort.onMessage.addListener((data) => {
-      if (!data || data.reqId == null) return;
-      const p = lrPending.get(data.reqId);
-      if (!p) return;
-      clearTimeout(p.timer);
-      lrPending.delete(data.reqId);
-      try { p.resolve(data.response); } catch (_) {}
-    });
-    lrPort.onDisconnect.addListener(() => {
-      const err = (chrome.runtime && chrome.runtime.lastError && chrome.runtime.lastError.message) || '';
-      lrPort = null;
-      lrPortReady = false;
-      if (/Extension context invalidated/i.test(err)) {
-        showToast('扩展已更新，请刷新此页面（Ctrl/Cmd+R）以重新加载脚本');
-        return;
-      }
-      // SW 休眠/崩溃：让挂起请求以「正在重连」结束（调用方会按 ok:false 处理），并尝试重连
-      lrPending.forEach((p) => { try { p.resolve({ ok: false, error: '后台连接断开，正在重连…' }); } catch (_) {} });
-      lrPending.clear();
-      setTimeout(lrConnect, 400);
-    });
-    lrPortReady = true;
-  }
-
+  // MV3 通信层：每次请求通过 chrome.runtime.sendMessage 重新唤醒后台 SW。
+  // 这是 MV3 官方推荐模式——SW 在 onMessage 的异步处理（fetch 进行中）期间保持活跃、
+  // 不会被回收，根本不存在「长连接端口空闲被回收 → 消息静默丢失 → 整批卡死」的问题。
+  // 首次冷启动若 SW 尚未注册好监听器，会报 "Receiving end"/"Could not establish connection"，
+  // 这里对连接类错误做有限次退避重试，给 SW 留出启动时间；真正的业务错误不重试，直接透出。
+  // v1.0.13：单条消息超时从 25s 提到 150s。根因：免费大模型（如硅基流动 Hunyuan-MT-7B）单批
+  // 20 行可能要 30~60s 才回，25s 超时把它误判成「后台断开」→ 又发一条重复请求 → 并发把免费接口
+  // 压垮 → 整批卡死在 48/520。慢但有效的响应不该触发重试，只有真正的 lastError 连接错误才重试；
+  // 150s 覆盖「两候选 URL 各 60s + 补译」的极端慢路径，正常慢响应首轮即可返回，不会误杀。
   function sendToBackground(msg, retries, timeoutMs) {
     retries = (typeof retries === 'number' && retries >= 0) ? retries : 3;
-    timeoutMs = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 30000;
+    // 与后台单次 fetch 超时(60s)对齐并留足免费模型慢响应余量；过短会让「慢但有效」的响应被当成
+    // 连接断开→重复发请求→免费接口被并发压垮→彻底卡死（v1.0.13 修复）
+    timeoutMs = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 150000;
     return new Promise((resolve) => {
+      let done = false;
       let attempt = 0;
+      const finish = (v) => { if (!done) { done = true; resolve(v); } };
       const tryOnce = () => {
         attempt++;
-        const reqId = ++lrReqSeq;
+        let cancelled = false;
         const timer = setTimeout(() => {
-          lrPending.delete(reqId);
-          if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; }
-          resolve({ ok: false, error: '后台响应超时（服务工作者可能已被系统中断）' });
+          if (cancelled || done) return;
+          cancelled = true;
+          if (attempt <= retries) { setTimeout(tryOnce, 250 * attempt); return; }
+          finish({ ok: false, error: '后台响应超时（服务工作者可能已被系统中断）' });
         }, timeoutMs);
-        if (lrPort && lrPortReady) {
-          lrPending.set(reqId, { resolve, timer });
-          try { lrPort.postMessage({ msg, reqId }); }
-          catch (e) {
-            lrPending.delete(reqId); clearTimeout(timer);
-            if (attempt <= retries) { setTimeout(tryOnce, 200 * attempt); return; }
-            resolve({ ok: false, error: String(e) });
-          }
-        } else {
-          // 端口未就绪（极早阶段 / 重连中）：降级到 sendMessage 并带连接错误重试
+        try {
           chrome.runtime.sendMessage(msg, (r) => {
+            if (cancelled || done) return;
             clearTimeout(timer);
             const err = (chrome.runtime && chrome.runtime.lastError) || null;
             if (err) {
               const text = (err.message || '') + '';
-              if (attempt <= retries && /Receiving end|Could not establish connection|background page has crashed|Extension context invalidated/i.test(text)) {
-                if (!lrPort) lrConnect();
-                setTimeout(tryOnce, 200 * attempt); return;
+              if (/Extension context invalidated/i.test(text)) {
+                showToast('扩展已更新，请刷新此页面（Ctrl/Cmd+R）以重新加载脚本');
+                finish({ ok: false, error: '扩展上下文已失效，请刷新页面（Ctrl/Cmd+R）' });
+                return;
               }
-              resolve({ ok: false, error: text || '后台无响应' });
+              if (attempt <= retries && /Receiving end|Could not establish connection|background page has crashed/i.test(text)) {
+                setTimeout(tryOnce, 250 * attempt);
+                return;
+              }
+              finish({ ok: false, error: text || '后台无响应' });
             } else {
-              resolve(r || { ok: false, error: '后台无响应' });
+              finish(r || { ok: false, error: '后台无响应' });
             }
           });
+        } catch (e) {
+          clearTimeout(timer);
+          if (attempt <= retries) { setTimeout(tryOnce, 250 * attempt); return; }
+          finish({ ok: false, error: String(e) });
         }
       };
       tryOnce();
@@ -2388,6 +2360,41 @@
     sendToBackground(msg)
       .then((r) => { try { cb && cb(r); } catch (e) {} })
       .catch(() => { try { cb && cb({ ok: false, error: '发送失败' }); } catch (e) {} });
+  }
+
+  // 是否「瞬时连接错误」：后台 SW 被系统中断 / 端口重连中 / 冷启动竞态。
+  // 这类错误重试本批次即可（端口会自动重连），不应当作致命业务错误结束整批任务。
+  function isTransientConnErr(err) {
+    if (!err) return false;
+    return /后台连接断开|Receiving end|Could not establish connection|后台响应超时|background page has crashed/i.test(err);
+  }
+
+  // 带「断线续译」的翻译批次发送：遇到瞬时连接错误（SW 被回收）时，等端口重连后
+  // 重试同一批，而不是把整批 356 行任务一断了之。已译出的行保留在 out 数组里，从断点续上。
+  async function sendTranslateBatchWithRetry(payload, opts) {
+    opts = opts || {};
+    const sendFn = opts.sendFn || sendToBackground;
+    const maxAttempts = (typeof opts.maxAttempts === 'number' && opts.maxAttempts > 0) ? opts.maxAttempts : 8;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (opts.isAborted && opts.isAborted()) return { ok: false, aborted: true };
+      const res = await sendFn(payload);
+      if (res && res.ok) return res;
+      const err = (res && res.error) || '未知错误';
+      // 上下文失效必须刷新页面，直接终止（不再重试，重试也没用）
+      if (/Extension context invalidated/i.test(err)) {
+        if (opts.onInvalidated) { try { opts.onInvalidated(err); } catch (_) {} }
+        return { ok: false, fatal: err };
+      }
+      if (isTransientConnErr(err)) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 500 * attempt)); // 退避：给 onDisconnect 里的重连（400ms）留时间
+        continue;
+      }
+      // 真正的业务错误（401/404/429/网络异常）：不重试，直接上报
+      return { ok: false, fatal: err };
+    }
+    return { ok: false, fatal: lastErr || '翻译连接多次重试仍失败' };
   }
 
   async function startTranslation(srcIdx, opts) {
@@ -2425,15 +2432,21 @@
     trProgress = { done: 0, total: work.length, ready: 0, engine: realEngine };
     const plan = planTrBatches(work.length);
     setStatus('正在翻译… 0/' + work.length + ' 行（' + realEngine + '）译文会边翻边上屏，不用等全部完成。');
+    // 无需心跳：sendMessage 模式每次请求重新唤醒 SW，翻译期间 SW 在 fetch 中保持活跃，不会被回收
     for (let bi = 0; bi < plan.length; bi++) {
       if (trAbort || gen !== trGen) break;
       const slice = work.slice(plan[bi].start, plan[bi].end);
       const texts = slice.map((i) => src[i]);
-      const res = await sendToBackground(
-        { type: 'translateBatch', texts: texts, sl: srcLangOf(srcIdx), tl: translateTarget, engine: trEngine }
+      const t0 = Date.now();
+      const res = await sendTranslateBatchWithRetry(
+        { type: 'translateBatch', texts: texts, sl: srcLangOf(srcIdx), tl: translateTarget, engine: trEngine },
+        {
+          isAborted: () => trAbort || gen !== trGen,
+          onInvalidated: (e) => showToast('扩展已更新，请刷新此页面（Ctrl/Cmd+R）以重新加载脚本'),
+        }
       );
-      if (!res || !res.ok) { fatal = (res && res.error) || '未知错误'; break; }
-      if (res.engine) realEngine = res.engine;         // 后台实际用的是哪个（可能被回退了）
+      if (res.aborted) break;
+      if (!res.ok) { fatal = res.fatal || '未知错误'; break; }      if (res.engine) realEngine = res.engine;         // 后台实际用的是哪个（可能被回退了）
       if (res.note && notes.indexOf(res.note) < 0) notes.push(res.note);
       const arr = res.results || [];
       slice.forEach((gi, k) => { out[gi] = String(arr[k] || '').trim(); });
@@ -2444,7 +2457,8 @@
         const n = await commitTranslation(srcIdx, key, out, !attached, srcCues);
         if (n) { attached = true; trProgress.ready = n; }
       }
-      setStatus('正在翻译… ' + done + '/' + work.length + ' 行 · 已上屏 ' + trProgress.ready + ' 行（' + realEngine + '）不用等全部译完。');
+      const slowHint = (Date.now() - t0 > 60000) ? '（接口较慢，正在等待第 ' + (bi + 1) + '/' + plan.length + ' 批返回，请稍候）' : '';
+      setStatus('正在翻译… ' + done + '/' + work.length + ' 行 · 已上屏 ' + trProgress.ready + ' 行（' + realEngine + '）' + slowHint + '不用等全部译完。');
       await new Promise((r) => setTimeout(r, 150));  // 免费接口，别打太猛
     }
     trRunning = false; trAbort = false;
@@ -3396,7 +3410,7 @@
 
   async function init() {
     // 每一步都独立 try/catch：任何一处出错都不能阻止面板出现
-    try { lrConnect(); } catch (e) { log('lrConnect 失败', e); }
+    // 通信层统一走 chrome.runtime.sendMessage（每次请求重新唤醒后台 SW），无需主动建端口
     try { await getSettings(); } catch (e) { log('getSettings 失败', e); }
     try { currentSite = detectSite(); } catch (e) { log('detectSite 失败', e); }
     if (!settings.enabled) { log('disabled'); return; }

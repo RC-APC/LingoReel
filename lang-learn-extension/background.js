@@ -327,8 +327,8 @@ function parseNumberedLines(out, n) {
   for (const s of res) if (s) hit++;
   return { results: res, hit: hit };
 }
-async function llmChatOnce(url, cfg, messages, maxTokens) {
-  const res = await fetchWithTimeout(url, 60000, {
+async function llmChatOnce(url, cfg, messages, maxTokens, timeoutMs) {
+  const res = await fetchWithTimeout(url, timeoutMs || 60000, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.apiKey },
     body: JSON.stringify({ model: cfg.model, messages: messages, temperature: 0.2, max_tokens: maxTokens })
@@ -349,16 +349,17 @@ async function llmChatOnce(url, cfg, messages, maxTokens) {
   return String(content);
 }
 // 调一次大模型（自动试候选 URL）
-async function llmChat(cfg, messages, maxTokens) {
+async function llmChat(cfg, messages, maxTokens, timeoutMs) {
   let lastErr = null;
   const urls = llmEndpointCandidates(cfg.baseUrl);
   for (const u of urls) {
-    try { return await llmChatOnce(u, cfg, messages, maxTokens); }
+    try { return await llmChatOnce(u, cfg, messages, maxTokens, timeoutMs); }
     catch (e) { lastErr = e; }
   }
   throw lastErr || new Error('大模型接口不可用');
 }
-// 一批字幕行走大模型。命中率不足时整批降级为逐条请求（保证不错行）
+// 一批字幕行走大模型。命中率不足时只补译「批译没拿到的行」（不重翻全部），并限制补译条数，
+// 避免 N 行逐条串行 → 每条 60s 超时 → 单批挂起十几分钟 / 把免费接口并发压垮（v1.0.13 加固）
 async function llmTranslateBatch(texts, sl, tl, cfg) {
   const n = texts.length;
   const results = new Array(n).fill('');
@@ -367,20 +368,30 @@ async function llmTranslateBatch(texts, sl, tl, cfg) {
   try {
     const out = await llmChat(cfg, buildLlmMessages(texts, sl, tl), Math.ceil(chars * 1.2) + 400);
     const p = parseNumberedLines(out, n);
-    if (p.hit >= Math.ceil(n * 0.8)) return { results: p.results, engine: 'llm', batched: true };
-  } catch (e) { /* 落到逐条 */ }
-  for (let i = 0; i < n; i++) {
-    try {
-      const out = await llmChat(cfg, buildLlmMessages([texts[i]], sl, tl), Math.ceil(String(texts[i]).length * 1.5) + 200);
-      const p = parseNumberedLines(out, 1);
-      // 模型可能把 "[1] 你好" 整个回回来，或干脆不带序号；两种情况都要拿到干净译文
-      const raw = String(out || '').trim()
-        .replace(/^\[?1\]?\s*[).、:：.\-]?\s*/, '')
-        .replace(/^```[a-zA-Z]*\n?|```$/g, '')
-        .trim();
-      results[i] = (p.results[0] || raw);
-    } catch (e) { results[i] = ''; }
-  }
+    for (let i = 0; i < n; i++) {
+      const v = String((p && p.results && p.results[i]) || '').trim();
+      if (v) results[i] = v;
+    }
+    if (p.hit >= Math.ceil(n * 0.8)) return { results: results, engine: 'llm', batched: true };
+    // 批译命中不足：只补"没拿到的行"，且限制补译条数；逐条用更短的超时(25s)并发补，避免长挂起
+    const miss = [];
+    for (let i = 0; i < n; i++) if (!results[i] && String(texts[i]).trim()) miss.push(i);
+    if (miss.length && miss.length <= 12) {
+      const sub = await Promise.all(miss.map(async (i) => {
+        try {
+          const o = await llmChat(cfg, buildLlmMessages([texts[i]], sl, tl), Math.ceil(String(texts[i]).length * 1.5) + 200, 25000);
+          const pp = parseNumberedLines(o, 1);
+          // 模型可能把 "[1] 你好" 整个回回来，或干脆不带序号；两种情况都要拿到干净译文
+          const raw = String(o || '').trim()
+            .replace(/^\[?1\]?\s*[).、:：.\-]?\s*/, '')
+            .replace(/^```[a-zA-Z]*\n?|```$/g, '')
+            .trim();
+          return pp.results[0] || raw;
+        } catch (e) { return ''; }
+      }));
+      miss.forEach((i, k) => { if (sub[k]) results[i] = sub[k]; });
+    }
+  } catch (e) { /* 批译异常：尽量保留已拿到的行 */ }
   return { results: results, engine: 'llm', batched: false };
 }
 
@@ -601,6 +612,9 @@ async function handleMessage(msg) {
       const r = await new Promise((res) => chrome.storage.local.get({ userDict: {} }, (x) => res(x)));
       return { ok: true, hit: dictLookup(r.userDict || {}, msg.word) };
     }
+    // 心跳：翻译长任务期间由 content script 周期发送，仅用于让 SW 保持活跃（重置空闲回收计时）
+    case 'ping':
+      return { ok: true, pong: true };
     default:
       return { ok: false, error: '未知消息类型：' + msg.type };
   }
@@ -613,19 +627,4 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // 异步响应
 });
 
-// 持久端口：content / 扩展页通过 connect 建长连接，规避 MV3 后台 SW 冷启动竞态
-// connect 会先唤醒 SW 并触发 onConnect，端口建立后才收发消息，首条消息不再「无接收方」
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'lingoreel') return;
-  port.onMessage.addListener(async (data) => {
-    const msg = data && data.msg;
-    const reqId = data && data.reqId;
-    let response;
-    try {
-      response = await handleMessage(msg);
-    } catch (e) {
-      response = { ok: false, error: String(e && e.message || e) };
-    }
-    try { port.postMessage({ reqId, response }); } catch (_) {}
-  });
-});
+  // 注：通信层已统一为 chrome.runtime.sendMessage（每次请求重新唤醒 SW），不再使用长连接端口。
