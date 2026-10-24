@@ -61,10 +61,16 @@
         if (t.name.simpleText) name = t.name.simpleText;
         else if (t.name.runs && t.name.runs[0] && t.name.runs[0].text) name = t.name.runs[0].text;
       }
+      // translationLanguages：该轨道可被 YouTube 官方翻译成的目标语言列表（如 zh-Hans / ja / en…）。
+      // 官方翻译的取法就是在这条轨道的 baseUrl 后面追加 &tlang=<目标语言>（见 content.js）。
+      const tlangs = (t.translationLanguages || []).map(function (x) {
+        return (x && x.languageCode) || '';
+      }).filter(Boolean);
       return {
         lan: t.languageCode || '',
         lan_doc: name || t.languageCode || '',
-        url: t.baseUrl || ''
+        url: t.baseUrl || '',
+        tlangs: tlangs
       };
     });
 

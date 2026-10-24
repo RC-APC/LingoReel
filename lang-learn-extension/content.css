@@ -160,6 +160,8 @@
 #ll-subbar .ll-btn:hover { background: #dbe4ff; }
 #ll-tr { flex: 0 0 auto; white-space: nowrap; }
 #ll-tr.ll-tr-on { background: #fff3bf; color: #e8590c; }
+/* YouTube 官方翻译按钮：只在 YouTube 显示（B 站无官方翻译接口），宽度固定、不换行 */
+#ll-yttr { flex: 0 0 auto; white-space: nowrap; }
 /* 对照行（多为中文译文）加深一档，避免和上面的原文糊在一起 */
 #ll-live .ll-live-sub { color: #495057; }
 

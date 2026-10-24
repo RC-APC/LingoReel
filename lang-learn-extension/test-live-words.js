@@ -34,6 +34,15 @@ function sliceFn(source, name) {
 const fnWrapWords = sliceFn(src, 'wrapWords');
 const fnUpdateLive = sliceFn(src, 'updateLive');
 
+// updateLive 现在用 cueForSpan / cueAtStart 决定「第二行挂哪一条」。
+// 同样从 content.js 的 dual-line-helpers 段抽真实源码，避免测复制品。
+const fnDualHelpers = (function () {
+  const A = '// >>> dual-line-helpers', B = '// <<< dual-line-helpers';
+  const a = src.indexOf(A), b = src.indexOf(B);
+  if (a < 0 || b < 0 || b <= a) throw new Error('找不到 dual-line-helpers 代码段');
+  return src.slice(src.indexOf('\n', a) + 1, b);
+})();
+
 // ---------- 记录型 DOM 桩 ----------
 function makeNode(tag) {
   const n = {
@@ -91,6 +100,7 @@ vm.runInContext(`
   function currentCursorCue() { return cursorCueFrom(cues); }
 `, sandbox);
 vm.runInContext(fnWrapWords, sandbox);
+vm.runInContext(fnDualHelpers, sandbox);
 vm.runInContext(fnUpdateLive, sandbox);
 
 // 用一个中间全局传值，避免往 vm 里注入字面量字符串时出错
@@ -222,6 +232,27 @@ liveKeyReset();
 vm.runInContext('__now = 5; subtitleTracks = [{ lan_doc: "中文", _virtual: false }];', sandbox);
 run();
 check('真实双语轨道不做时间轴校验（照旧显示）', !!find(liveEl, 'll-live-sub'));
+vm.runInContext('subtitleTracks = []; selectedTrack2 = -1;', sandbox);
+
+// 8) YouTube 官方译文轨道：官方把多个 ASR 碎片合并成一句（分段比原轨道粗、起点能差好几秒）。
+//    v1.0.14 的旧逻辑「起点差 > 0.35s 就不挂第二行」会让第二行整段消失 → 用户看到「时有时无」。
+//    现在按时间区间取，必须一直挂着。
+liveKeyReset();
+vm.runInContext('__now = 5; cues = __c1;' +
+  ' cues2 = [{ index: 0, from: 0, to: 8, text: "我很好，谢谢你。尼尔，你做过糟糕的工作吗？" }];' +
+  ' subtitleTracks = [{ lan_doc: "中文（YouTube 翻译）", _virtual: true, _yt: true }]; selectedTrack2 = 0;', sandbox);
+run();
+const subYt = find(liveEl, 'll-live-sub');
+check('官方译文分段更粗（起点差 4s）也照样挂第二行', !!subYt, subYt ? '「' + subYt.textContent + '」' : '缺失');
+check('官方译文轨道取到的是官方那条正文', !!subYt && /尼尔/.test(subYt.textContent));
+
+// 跨两条官方译文（原行 4→8 横跨 3→6 的边界）→ 合并成一句显示
+liveKeyReset();
+vm.runInContext('__now = 5; cues2 = [{ index: 0, from: 0, to: 5, text: "第一段" }, { index: 1, from: 5, to: 9, text: "第二段" }];', sandbox);
+run();
+const subMerge = find(liveEl, 'll-live-sub');
+check('原行横跨两条官方译文时合并成一句', !!subMerge && subMerge.textContent === '第一段第二段',
+  subMerge ? '「' + subMerge.textContent + '」' : '缺失');
 vm.runInContext('subtitleTracks = []; selectedTrack2 = -1;', sandbox);
 
 const failed = results.filter((r) => !r.ok);

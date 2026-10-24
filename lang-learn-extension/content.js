@@ -80,7 +80,8 @@
   let trRunning = false;       // 是否正在翻译
   let trAbort = false;         // 用户点了「停止」
   let trGen = 0;               // 视频切换代号：防止旧视频的翻译结果串台到新视频
-  let trStore = {};            // srcIdx -> { key, tl, cues:[] }（译文正文，供虚拟轨道读取）
+  let trStore = {};            // srcIdx -> { key, tl, cues:[] }（AI 译文正文，供虚拟轨道读取）
+  let ytTrStore = {};          // srcIdx -> { tl, tlang, cues:[] }（YouTube 官方翻译正文，供 _yt 虚拟轨道读取）
   let lastTrInfo = null;       // 上次翻译结果（引擎 / 错误），供诊断显示
   // 渐进式翻译进度：{ done, total, ready, engine }。译文是**边翻边上屏**的，
   // 所以这里记的是"已经翻完多少行 / 已经有多少行真正显示出来"，供状态栏与诊断使用。
@@ -405,9 +406,9 @@
   }
 
   async function fetchSubtitleData(track) {
-    // 虚拟轨道（AI 中文译文）：正文就在内存里，不走网络
+    // 虚拟轨道（AI 译文 / YouTube 官方译文）：正文就在内存里，不走网络
     if (track && track._virtual) {
-      const rec = trStore[track._src];
+      const rec = track._yt ? ytTrStore[track._src] : trStore[track._src];
       return (rec && rec.cues ? rec.cues : []).map((c) => ({ from: c.from, to: c.to, content: c.text }));
     }
     if (track && track._fmt === 'yt') return fetchYtData(track.url);
@@ -549,6 +550,7 @@
         <select id="ll-track2" title="${t('track2Title')}"><option value="-1">${t('track2None')}</option></select>
         <button id="ll-reload" class="ll-btn" title="${t('reloadTitle')}">⟳</button>
         <button id="ll-tr" class="ll-btn" title="把当前字幕轨道翻译成所选母语，生成一条 AI 翻译轨道">翻译</button>
+        <button id="ll-yttr" class="ll-btn" style="display:none;" title="用 YouTube 官方翻译接口生成「原字幕 + 官方译文」两行（免费、即时）">YT译</button>
       </div>
       <div id="ll-vocab" style="display:none;"></div>
       <div id="ll-review" style="display:none;"></div>
@@ -646,6 +648,13 @@
     refreshShadowBtn();
     document.getElementById('ll-reload').onclick = () => { loadSubtitles(); };
     document.getElementById('ll-tr').onclick = onTranslateClick;
+    {
+      const yb = document.getElementById('ll-yttr');
+      if (yb) {
+        yb.onclick = startYtOfficialTranslation;
+        if (currentSite === 'youtube') yb.style.display = '';
+      }
+    }
     document.getElementById('ll-track').onchange = (e) => {
       const idx = Number(e.target.value);
       if (idx >= 0) selectTrack(idx);
@@ -846,6 +855,7 @@
     const sel2 = document.getElementById('ll-track2');
     if (!sel) return;
     const keep = selectedTrack;    // 重建后还原选中项（新增译文轨道时会调用到这里）
+    const keep2 = selectedTrack2;  // 对照项也要还原：以前只还原主轨道，重建一次「对照」就显示成"无"了
     sel.innerHTML = '';
     if (sel2) sel2.innerHTML = '<option value="-1">对照：无</option>';
     if (!subtitleTracks.length) {
@@ -867,6 +877,9 @@
       }
     });
     if (keep >= 0 && keep < subtitleTracks.length) sel.value = String(keep);
+    // 对照项：只有真的失效（越界/负数）才落回「无」，否则保持原选择，
+    // 避免「生成译文轨道 / 渐进式翻译每批次重建下拉」把对照选择洗成"无"
+    if (sel2 && keep2 >= 0 && keep2 < subtitleTracks.length) sel2.value = String(keep2);
   }
 
   // ---------- 字幕列表渲染 ----------
@@ -1021,6 +1034,62 @@
     }
     return cur;
   }
+  // >>> dual-line-helpers（纯函数，test-yt-official.js 直接抽取这一段来跑）
+  // 在时间区间 [from,to] 内找「对照轨道」该显示的那一条（或几条合并）。
+  // 为什么不能按 index / 起点差硬对齐：YouTube 官方译文（tlang）常把原轨道的多个 ASR 碎片
+  // 合并成整句，分段比原轨道**粗**，于是第二条轨道的 from 与原文行的 from 能差好几秒。
+  // 老逻辑「起点差 > 0.35s 就不挂第二行」会让第二行在整个粗分段里全程消失、到下一条分段
+  // 起点碰巧对上了才短暂出现——用户看到的就是「有时显示有时不显示」。
+  // 这里改成按时间区间取：有交集就收下（多段则合并成一句），没有交集返回 null，
+  // 由调用方决定要不要退回到「当前时段最近一条」。
+  function cueForSpan(arr, from, to, tol) {
+    if (!arr || !arr.length) return null;
+    const t0 = Number(from) || 0;
+    const t1 = Math.max(t0, Number(to) || t0);
+    const pad = (typeof tol === 'number' && tol >= 0) ? tol : 0.6;
+    const hits = [];
+    for (let i = 0; i < arr.length; i++) {
+      const c = arr[i];
+      if (c.to < t0 - pad) continue;          // 早就结束了
+      if (c.from > t1 + pad) break;           // 后面的只会更晚（arr 按 from 升序）
+      if (c.to >= t0 - pad && c.from <= t1 + pad) hits.push(c);
+    }
+    if (!hits.length) return null;
+    if (hits.length === 1) {
+      const h = hits[0];
+      return { index: h.index, from: h.from, to: h.to, text: h.text };
+    }
+    // 多段合并成一句：按时间顺序拼，跳过"已被包含"的重复片段（滚动式轨道同一句会重复给几遍）
+    let text = '';
+    for (const h of hits) {
+      const s = String(h.text || '').trim();
+      if (!s) continue;
+      if (!text) { text = s; continue; }
+      if (text.indexOf(s) >= 0) continue;
+      if (s.indexOf(text) >= 0) { text = s; continue; }
+      // 拉丁字母语言加空格，中日韩直接相接
+      text += (/^[A-Za-z0-9]/.test(s) ? ' ' : '') + s;
+    }
+    if (!text) return null;
+    return { index: hits[0].index, from: hits[0].from, to: hits[hits.length - 1].to, text: text };
+  }
+  // AI 译文轨道用：按「起点完全相同」取（译文 cue 是从原句 cue 1:1 生成的，from 精确相同）。
+  // 严谨到 0.06s 是故意的：渐进式翻译时未翻的行没有 cue，绝不能把上一行的旧译文挂上来。
+  function cueAtStart(arr, from, tol) {
+    if (!arr || !arr.length) return null;
+    const t = Number(from) || 0;
+    const pad = (typeof tol === 'number' && tol >= 0) ? tol : 0.06;
+    let best = null, bd = Infinity;
+    for (let i = 0; i < arr.length; i++) {
+      const c = arr[i];
+      if (c.from > t + pad) break;
+      const d = Math.abs(c.from - t);
+      if (d <= pad && d < bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+  // <<< dual-line-helpers
+
   // 实时字幕：窗口化浮窗里它就是唯一的内容行，所以渲染成「逐词可点」——点词查释义、双击存生词。
   // liveKey 去重：只有当前行真的换了才重建 DOM；否则每帧重写会把用户刚点出来的释义弹层和
   // :hover 状态一起冲掉（这正是「浮窗里点词看不到释义」的根因）。
@@ -1037,13 +1106,24 @@
       return;
     }
     const cur = currentCursorCue();
-    let cur2 = cues2.length ? cursorCueFrom(cues2) : null;
-    // 渐进式翻译期间 cues2 只有"前若干行"：若被选中的那条对照轨恰好是 AI 译文虚拟轨道，
-    // 而它给出的这一条并不是当前原句的译文（时间轴对不上），就不要挂在原文下面——
-    // 否则视频播到第 100 行时，下面挂的会是第 8 行的旧译文。
-    // 只对虚拟译文轨道做这个校验：真实的双语轨道允许时间轴有各自的偏移，不去动它。
     const vSub = subtitleTracks[selectedTrack2];
-    if (cur2 && cur && vSub && vSub._virtual && Math.abs(cur2.from - cur.from) > 0.35) cur2 = null;
+    let cur2 = null;
+    if (cues2.length) {
+      if (cur && vSub && vSub._yt) {
+        // YouTube 官方译文：官方常把多个 ASR 碎片合并成整句，分段比原轨道粗、起点能差好几秒。
+        // 按「时间区间取」，取不到再兜底成「当前时段最近一条」（与主行一致的粘性），
+        // 第二行不会因为时间轴对不齐而整段消失（v1.0.15 修「时有时无」）。
+        cur2 = cueForSpan(cues2, cur.from, cur.to, 1.2);
+        if (!cur2) cur2 = cursorCueFrom(cues2);
+      } else if (cur && vSub && vSub._virtual) {
+        // AI 译文：与原文 1:1 同起点，只认「起点相同」那一条。
+        // 渐进式翻译时未翻的行没有 cue，宁可空着也不能把上一行的旧译文挂到这一行下面。
+        cur2 = cueAtStart(cues2, cur.from, 0.06);
+      } else {
+        // 真实双语轨道（用户自己选的第二字幕）：允许各自时间轴有偏移，沿用原来的取法
+        cur2 = cursorCueFrom(cues2);
+      }
+    }
     if (!cur && !cur2) {
       if (liveKey === 'none') return;
       liveKey = 'none';
@@ -1993,7 +2073,9 @@
       lan: t.languageCode || '',
       lan_doc: (t.name && t.name.simpleText) || t.languageCode || '',
       url: t.baseUrl,
-      _fmt: 'yt'
+      _fmt: 'yt',
+      // 该轨道支持被 YouTube 官方翻译成的目标语言列表（baseUrl + &tlang= 即可取到）
+      _tlang: (t.translationLanguages || []).map((x) => (x && x.languageCode) || '').filter(Boolean)
     }));
   }
   // 统一入口：无论轨道来自「DOM/全局变量解析」还是「主世界桥接消息」，都走这里
@@ -2002,11 +2084,14 @@
     if (!vid || !Array.isArray(tracks)) return;
     if (vid === ytLastVideoId) return;   // 同一视频不重复加载
     ytLastVideoId = vid;
+    ytTrStore = {};                       // 换视频：上一视频的官方译文作废
     if (!tracks.length) {
       setStatus('该 YouTube 视频没有可用 CC 字幕轨道（可能是仅硬字幕，或无字幕）。');
       return;
     }
-    subtitleTracks = tracks.map((t) => ({ lan: t.lan, lan_doc: t.lan_doc, url: t.url, _fmt: 'yt' }));
+    subtitleTracks = tracks.map((t) => ({ lan: t.lan, lan_doc: t.lan_doc, url: t.url, _fmt: 'yt', _tlang: t._tlang || [] }));
+    // YouTube 才显示「YT译」按钮（B 站没有官方翻译接口，保持原布局）
+    try { const yb = document.getElementById('ll-yttr'); if (yb) yb.style.display = ''; } catch (e) { /* noop */ }
     if (typeof populateTrackSelect === 'function') populateTrackSelect();
     // 自动优先选非中文轨道（学外语），否则选第一条
     const preferred = pickMainTrack();
@@ -2205,7 +2290,7 @@
 
   function ensureVirtualTrack(srcIdx) {
     const doc = langDocName(translateTarget) + '（AI 翻译）';
-    let i = subtitleTracks.findIndex((t) => t._virtual && t._src === srcIdx);
+    let i = subtitleTracks.findIndex((t) => t._virtual && t._src === srcIdx && !t._yt);
     if (i < 0) {
       subtitleTracks.push({
         lan: translateTarget,
@@ -2222,6 +2307,53 @@
     }
     return i;
   }
+
+  // —— YouTube 官方翻译轨道（复用 AI 译文的虚拟轨道机制，但正文来自 YouTube 官方 tlang 接口）——
+  // 同一源轨道可同时存在 AI 译文与官方译文两条虚拟轨道，用 _yt 区分，互不覆盖。
+  function ensureYtVirtualTrack(srcIdx) {
+    const doc = langDocName(translateTarget) + '（YouTube 翻译）';
+    let i = subtitleTracks.findIndex((t) => t._virtual && t._src === srcIdx && t._yt);
+    if (i < 0) {
+      subtitleTracks.push({
+        lan: translateTarget,
+        lan_doc: doc,
+        url: 'll-yttranslate://' + srcIdx,
+        _virtual: true,
+        _src: srcIdx,
+        _yt: true
+      });
+      i = subtitleTracks.length - 1;
+    } else {
+      subtitleTracks[i].lan = translateTarget;
+      subtitleTracks[i].lan_doc = doc;
+    }
+    return i;
+  }
+
+  // >>> yt-official-helpers（纯函数，test-yt-official.js 直接抽取这一段来跑）
+  // 插件目标语言（zh-CN / zh-TW / en / ja…）→ YouTube translationLanguages 的代码
+  function ytTlangForTarget(tl) {
+    const m = { 'zh-CN': 'zh-Hans', 'zh-TW': 'zh-Hant', 'zh-HK': 'zh-Hant', 'zh': 'zh-Hans' };
+    return m[tl] || tl;
+  }
+  // 这条轨道能否被官方翻译到目标语言？能则返回要用的 tlang 代码，否则返回 ''
+  function ytOfficialTlang(track, tl) {
+    if (!track || track._virtual) return '';
+    const want = ytTlangForTarget(tl);
+    const list = (track._tlang || []).map((x) => String(x));
+    if (!list.length) return want;             // 列表未知：乐观尝试一次（失败会给出提示）
+    if (list.indexOf(want) >= 0) return want;
+    const base = String(want).split('-')[0];
+    const hit = list.find((x) => String(x).split('-')[0] === base);
+    return hit || '';
+  }
+  // 在轨道 baseUrl 上追加 tlang（保留 pot 等令牌；已有 tlang 先剔除）
+  function ytUrlWithTlang(url, tlang) {
+    let u = String(url || '').replace(/[?&]tlang=[^&]*/g, '');
+    u += (u.indexOf('?') >= 0 ? '&' : '?') + 'tlang=' + encodeURIComponent(tlang);
+    return u;
+  }
+  // <<< yt-official-helpers
 
   // 分块调度：**首块刻意小**（8 行）→ 几秒内就能看到第一屏译文；之后每块 20 行。
   // 每块译完立刻上屏一次（渐进式），所以首块越小、用户越早看到东西；后块大一些，
@@ -2507,6 +2639,58 @@
   function onTranslateClick() {
     if (trRunning) { trAbort = true; showToast('正在停止…'); return; }
     startTranslation(selectedTrack, {});
+  }
+
+  // 用 YouTube 官方翻译接口生成译文轨道：在源轨道 baseUrl 后追加 &tlang=<目标语言>，
+  // 取回官方已翻译好的字幕，作为一条虚拟轨道挂上（默认设为对照轨道 → 浮窗里原文 + 官方译文两行）。
+  // 与 AI 翻译完全独立：免费、即时、不消耗 API；拉不到时提示改用「翻译」按钮走 AI。
+  async function startYtOfficialTranslation() {
+    if (currentSite !== 'youtube') { showToast('YouTube 官方翻译只适用于 YouTube 视频'); return; }
+    const srcIdx = selectedTrack;
+    const track = subtitleTracks[srcIdx];
+    if (!track || track._virtual) { showToast('请先在主轨道下拉里选一条原始字幕（不是译文轨道）'); return; }
+    const tlang = ytOfficialTlang(track, translateTarget);
+    if (!tlang) {
+      showToast('这条轨道不支持 YouTube 官方翻译到「' + langDocName(translateTarget) + '」，可点「翻译」按钮走 AI');
+      return;
+    }
+    // 优先用「主世界截获的播放器 timedtext URL」作基址——它带 pot 令牌，官方接口才认；
+    // 回落用轨道自身 baseUrl。两者都失败才提示。
+    // 顺序刻意是「完全同语言的截获 URL → 轨道 baseUrl → 近似语言的截获 URL」：
+    // 截获的常常是播放器默认的那条轨（比如 en），而用户选的是 en-AU，两条轨分段不同、
+    // 译文时间轴会整体错位（第二行就容易对不上）；能对上完全同语言的就先用它。
+    const bases = [];
+    let looseBase = '';
+    try {
+      if (pendingYtBody && pendingYtBody.url) {
+        const cl = langFromYtUrl(pendingYtBody.url).toLowerCase();
+        const tl2 = String(track.lan || '').toLowerCase();
+        if (cl && tl2 && cl === tl2) bases.push(pendingYtBody.url);          // 完全同轨：时间轴最贴
+        else if (!cl || !tl2 || cl.indexOf(tl2) === 0 || tl2.indexOf(cl) === 0) looseBase = pendingYtBody.url;
+      }
+    } catch (e) { /* noop */ }
+    if (track.url && bases.indexOf(track.url) < 0) bases.push(track.url);
+    if (looseBase && bases.indexOf(looseBase) < 0) bases.push(looseBase);
+    setStatus('正在从 YouTube 官方接口拉取「' + langDocName(translateTarget) + '」翻译字幕…');
+    let arr = [];
+    for (const base of bases) {
+      try { arr = await fetchYtData(ytUrlWithTlang(base, tlang)); } catch (e) { lastSelectError = e && e.message; }
+      if (arr && arr.length) break;
+    }
+    if (!arr || !arr.length) {
+      setStatus('YouTube 官方翻译轨道拉不到正文（该视频可能未开放翻译，或 timedtext 令牌校验失败）。可点「翻译」按钮走 AI；或确认播放器字幕按钮已点亮、刷新页面后重试。');
+      return;
+    }
+    ytTrStore[srcIdx] = { tl: translateTarget, tlang: tlang, cues: arr };
+    const vIdx = ensureYtVirtualTrack(srcIdx);
+    populateTrackSelect();
+    // 还原主轨道选择；把官方译文挂成对照轨道
+    const sel = document.getElementById('ll-track');
+    if (sel && selectedTrack >= 0) sel.value = String(selectedTrack);
+    const sel2 = document.getElementById('ll-track2');
+    if (sel2) sel2.value = String(vIdx);
+    await selectTrack2(vIdx);
+    setStatus('已生成「' + langDocName(translateTarget) + '（YouTube 翻译）」轨道（' + arr.length + ' 行，官方免费）。原文 + 官方译文两行已上屏；也可在主轨道下拉里选它只看译文。');
   }
 
   // ---------- B 站字幕加载（原 loadSubtitles） ----------
@@ -2884,7 +3068,15 @@
     }
     lines.push('CC 轨道数: ' + subtitleTracks.length);
     subtitleTracks.forEach((t, i) => lines.push('  [' + i + '] ' + t.lan_doc + '（' + t.lan + '）' +
-      (t._virtual ? ' ←AI 译文轨道' : '') + (i === selectedTrack ? ' ←已选' : '') + (i === selectedTrack2 ? ' ←对照' : '')));
+      (t._virtual ? (t._yt ? ' ←YouTube 官方译文轨道' : ' ←AI 译文轨道') : '') + (i === selectedTrack ? ' ←已选' : '') + (i === selectedTrack2 ? ' ←对照' : '')));
+    // 当前选中源轨道支持被 YouTube 官方翻译成的语言（官方 tlang 接口可用性）
+    try {
+      const st = subtitleTracks[selectedTrack];
+      if (currentSite === 'youtube' && st && !st._virtual) {
+        lines.push('YouTube 官方翻译可用目标: ' + ((st._tlang && st._tlang.length) ? st._tlang.join(', ') : '（未知/该轨道未返回 translationLanguages）'));
+        lines.push('本次要走的目标 tlang: ' + (ytOfficialTlang(st, translateTarget) || '（不支持）'));
+      }
+    } catch (e) { /* noop */ }
     lines.push('—— AI 中文译文轨道 ——');
     lines.push('自动翻译: ' + (autoTranslate ? '开' : '关') + '，引擎: ' + trEngine + '，目标: ' + translateTarget);
     // 大模型配置状态（故意不打印 Key 本身，只报"有没有填 / 填了哪个地址模型"）
@@ -2907,6 +3099,38 @@
       lines.push('上次翻译: 无（未触发）');
     }
     lines.push('已加载字幕行数: ' + cues.length);
+    // 对照（双语）轨道体检：第二行为什么「有时显示有时不显示」全看这几行。
+    // 官方译文（tlang）常把原轨道多个 ASR 碎片合并成整句 → 分段更粗、起点差可达数秒；
+    // 起点差中位数大 / >0.35s 的行多，就说明两轨时间轴不是逐行对齐的（正常，不是 bug）。
+    try {
+      const sub2 = (selectedTrack2 >= 0) ? subtitleTracks[selectedTrack2] : null;
+      lines.push('对照轨道: ' + (sub2 ? (sub2.lan_doc + '（' + sub2.lan + '）· ' + cues2.length + ' 行' +
+        (sub2._virtual ? (sub2._yt ? ' · 官方译文(区间取)' : ' · AI 译文(起点取)') : '')) : '无'));
+      if (sub2 && cues2.length && cues.length) {
+        const diffs = [];
+        for (const c of cues) {
+          const hit = cueAtStart(cues2, c.from, 3);   // 3s 内最近的一条，仅用于统计
+          if (hit) diffs.push(Math.abs(hit.from - c.from));
+        }
+        diffs.sort((a, b) => a - b);
+        const med = diffs.length ? diffs[Math.floor(diffs.length / 2)] : 0;
+        const far = diffs.filter((d) => d > 0.35).length;
+        lines.push('对照时间轴对位: 起点差中位数 ' + med.toFixed(2) + 's，>0.35s 的 ' + far + '/' + diffs.length + ' 行' +
+          (far > 5 ? '（官方译文分段比原轨道粗，属正常；v1.0.15 起按时间区间取，不再因此隐藏第二行）' : ''));
+        const vNow = getVideo();
+        const tNow = vNow ? vNow.currentTime : 0;
+        let mNow = null;
+        for (const c of cues) { if (c.from <= tNow) mNow = c; else break; }
+        if (mNow) {
+          let got = null;
+          if (sub2._yt) got = cueForSpan(cues2, mNow.from, mNow.to, 1.2) || cursorCueFrom(cues2);
+          else if (sub2._virtual) got = cueAtStart(cues2, mNow.from, 0.06);
+          else got = cursorCueFrom(cues2);
+          lines.push('当前 ' + tNow.toFixed(1) + 's 取到: 原文第 ' + mNow.index + ' 行 / 译文' +
+            (got ? ('第 ' + got.index + ' 行「' + String(got.text || '').slice(0, 24) + '」') : '（空——未翻到或对不上）'));
+        }
+      }
+    } catch (e) { /* noop */ }
     // 自动暂停体检：这三行能直接区分「开关没生效 / 事件没挂上 / 目标被一直往前推」三种失败
     lines.push('video 事件已挂: ' + (videoWired ? '是' : '否（timeupdate 不来 → 高亮/实时行/自动暂停都会失灵）') +
       (wiredEl ? '，已挂元素当前时间 ' + (wiredEl.currentTime || 0).toFixed(1) + 's' : ''));
@@ -3061,6 +3285,45 @@
     bar.insertBefore(b, document.getElementById('ll-pause'));
   }
 
+  // 母语（= 译文语言）被改掉之后：旧译文轨道属于上一个语言，留着会变成「轨道名写新语言、
+  // 正文还是旧语言」的错位状态（对照位也会一直挂着旧语言的译文）。
+  // 做法：作废在飞的翻译 → 删掉所有虚拟译文轨道与正文缓存 → 指针退回到源轨道 →
+  // 开着自动翻译就按新母语重译，否则提示手动点「翻译 / YT译」。
+  // 译文缓存本身按「视频|源语言|目标语言|引擎|正文」分键，切回原母语会直接命中缓存，不用重翻。
+  function onTranslateTargetChanged(prevTarget) {
+    const hasVirtual = subtitleTracks.some((t) => t._virtual);
+    const hasBody = Object.keys(trStore).length > 0 || Object.keys(ytTrStore).length > 0;
+    if (!hasVirtual && !hasBody && !trRunning) return;   // 还没有任何译文：什么都不用做
+    // 在飞的翻译翻的是旧语言 → 作废（trGen 变化后，已返回的批次会被丢弃）
+    if (trRunning) { trGen++; trAbort = true; trRunning = false; try { setTrButton(false); } catch (e) {} }
+    trProgress = null; lastTrInfo = null;
+    // 主轨道 / 对照轨道若正停在译文轨道上，先记下它的源轨道，删完退回源轨道
+    const curMain = subtitleTracks[selectedTrack];
+    const curSec = subtitleTracks[selectedTrack2];
+    const srcOfMain = (curMain && curMain._virtual) ? curMain._src : -1;
+    const srcOfSec = (curSec && curSec._virtual) ? curSec._src : -1;
+    const keepOldIdx = [];
+    const kept = [];
+    subtitleTracks.forEach((t, i) => { if (!t._virtual) { kept.push(t); keepOldIdx.push(i); } });
+    subtitleTracks = kept;
+    trStore = {}; ytTrStore = {};
+    cues2 = []; liveKey = '';
+    const remap = (old) => (old >= 0 ? keepOldIdx.indexOf(old) : -1);   // 旧索引 → 新索引，被删的落到 -1
+    selectedTrack = (srcOfMain >= 0) ? remap(srcOfMain) : remap(selectedTrack);
+    if (selectedTrack < 0 && subtitleTracks.length) selectedTrack = 0;
+    selectedTrack2 = (srcOfSec >= 0) ? -1 : remap(selectedTrack2);
+    try { populateTrackSelect(); } catch (e) { /* noop */ }
+    const sel = document.getElementById('ll-track');
+    if (sel && selectedTrack >= 0) sel.value = String(selectedTrack);
+    try { updateLive(); } catch (e) { /* noop */ }
+    showToast('母语已切换为「' + langDocName(translateTarget) + '」，' + langDocName(prevTarget) + '译文轨道已清空', 4000);
+    if (autoTranslate && cues.length) {
+      try { maybeAutoTranslate(selectedTrack); } catch (e) { /* noop */ }
+    } else {
+      setStatus('母语已切换为「' + langDocName(translateTarget) + '」，点面板「译 ' + langDocName(translateTarget) + '」或「YT译」可按新母语重新生成译文轨道。');
+    }
+  }
+
   // ---------- 启动 ----------
   // 把 storage 的设置套用到运行时状态 + 面板（供 onChanged 与轮询共用）
   function applySettings(r) {
@@ -3079,8 +3342,13 @@
       eudicAction = settings.eudicAction;
       autoTranslate = r.autoTranslate !== false;
       trEngine = r.trEngine || 'auto';
+      const prevTarget = translateTarget;
       translateTarget = r.translateTarget || 'zh-CN';
       uiLang = I18N[translateTarget] ? translateTarget : 'zh-CN';   // 界面语言跟随母语
+      // 母语变了 = 译文目标语言变了：旧译文轨道要清掉，否则会出现「名字是新语言、正文还是旧语言」
+      if (prevTarget !== translateTarget) {
+        try { onTranslateTargetChanged(prevTarget); } catch (e) { log('切换母语后清理译文轨道失败', e); }
+      }
       panelOpacity = (typeof r.panelOpacity === 'number' && r.panelOpacity > 0) ? r.panelOpacity : 0.85;
       textOpacity = (typeof r.textOpacity === 'number' && r.textOpacity >= 0) ? r.textOpacity : 1;
       const btn = document.getElementById('ll-pause');
@@ -3113,7 +3381,7 @@
     try { if (observer) { observer.disconnect(); observer = null; } } catch (e) {}
     observedEl = null; lastText = '';
     // 换视频：让在飞的翻译作废（trGen 变化 → 结果被丢弃），并清空译文缓存引用
-    trGen++; trAbort = true; trRunning = false; trStore = {}; lastTrInfo = null; trProgress = null;
+    trGen++; trAbort = true; trRunning = false; trStore = {}; ytTrStore = {}; lastTrInfo = null; trProgress = null;
     try { setTrButton(false); } catch (e) {}
     cues = []; cues2 = []; subtitleTracks = []; selectedTrack = -1; selectedTrack2 = -1; liveKey = '';
     dataReady = false; loadFailed = false; usingDomFallback = false;
