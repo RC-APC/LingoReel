@@ -928,16 +928,81 @@
     updateHighlight();
   }
 
+  // >>> word-segmentation
+  // 中/日/韩等语言不用空格分词。旧逻辑 text.split(/(\s+)/) 会把整句变成一个「词」，
+  // 点一下就拿整句话去查词典；纯 CJK 超过 24 字还会被整句屏蔽、完全点不动。
+  // 改用浏览器原生 Intl.Segmenter（ICU 词典，Chrome/Edge/夸克/Kiwi 均自带）按词切；
+  // 老内核没有该 API 时降级为「按字切」，至少每个汉字/假名都能单独点。
+  // 英文仍走原来的空白切分，行为完全不变（I'm / excellent / 撇号都保留）。
+  const LL_CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3005\u3007\u3040-\u30ff\uff66-\uff9f\u3130-\u318f\uac00-\ud7af]/u;
+  function llHasCjk(s) { return LL_CJK_RE.test(String(s || '')); }
+  function llCleanWord(s) { return String(s || '').replace(/[^\p{L}'’]/gu, ''); }
+
+  let llSegmenter = undefined;      // undefined = 还没探测；null = 该内核不支持
+  let llSegmenterOk = false;
+  function llWordSegmenter() {
+    const ok = (typeof Intl !== 'undefined' && Intl.Segmenter && typeof Intl.Segmenter === 'function');
+    if (llSegmenter !== undefined && !!ok === llSegmenterOk) return llSegmenter;
+    llSegmenterOk = !!ok;
+    try { llSegmenter = ok ? new Intl.Segmenter('zh', { granularity: 'word' }) : null; }
+    catch (e) { llSegmenter = null; }
+    return llSegmenter;
+  }
+
+  // 切一个「不含空白且含 CJK」的片段 → [{ text, word }]；word='' 表示标点/不可点
+  function llSplitCjkToken(t) {
+    const seg = llWordSegmenter();
+    const out = [];
+    if (seg) {
+      try {
+        for (const p of seg.segment(t)) {
+          out.push({ text: p.segment, word: p.isWordLike ? llCleanWord(p.segment) : '' });
+        }
+        if (out.length) return out;
+      } catch (e) { /* 落到按字切 */ }
+    }
+    // 降级：CJK 逐字可点，其余（英文/数字/标点）攒成一段走原清洗规则
+    let buf = '';
+    const flush = () => {
+      if (!buf) return;
+      out.push({ text: buf, word: llCleanWord(buf) });
+      buf = '';
+    };
+    for (const ch of Array.from(String(t))) {
+      if (LL_CJK_RE.test(ch)) { flush(); out.push({ text: ch, word: ch }); }
+      else buf += ch;
+    }
+    flush();
+    return out;
+  }
+
+  // 整行切词：先按空白还原英文行为，再只对含 CJK 的片段做二次分词
+  function llTokenizeLine(text) {
+    const out = [];
+    const parts = String(text || '').split(/(\s+)/);
+    for (const t of parts) {
+      if (t === '') continue;
+      if (/^\s+$/.test(t)) { out.push({ text: t, space: true, word: '' }); continue; }
+      if (llHasCjk(t)) { llSplitCjkToken(t).forEach((x) => out.push(x)); continue; }
+      out.push({ text: t, space: false, word: llCleanWord(t) });
+    }
+    return out;
+  }
+  // <<< word-segmentation
+
   function wrapWords(container, text) {
-    const tokens = text.split(/(\s+)/);
-    tokens.forEach((t) => {
-      if (t === '' || /^\s+$/.test(t)) { container.appendChild(document.createTextNode(t)); return; }
+    // 只要这一行含 CJK，整行（含中文标点、夹在中间的英文词）都去掉英文用的 padding：
+    // 中文词之间没有空格，若逐片段判断，标点片段就会漏掉、把中文撑出人为字距。
+    const cjkLine = llHasCjk(String(text || ''));
+    llTokenizeLine(text).forEach((tok) => {
+      if (!tok.text) return;
+      if (tok.space) { container.appendChild(document.createTextNode(tok.text)); return; }
       const span = document.createElement('span');
       span.className = 'll-word';
-      span.textContent = t;
-      const clean = t.replace(/[^\p{L}'’]/gu, '');
-      // 整句级的纯 CJK token（中文译文行、无空格的日语行）不挂查词，
-      // 否则点一下就是拿一整句话去查词典 / 唤起欧路。
+      if (cjkLine) span.classList.add('ll-cjk');
+      span.textContent = tok.text;
+      const clean = tok.word || '';
+      // 兜底：万一分词器失效、某片段仍是超长纯 CJK 整句，也不拿整句去查词典
       const isSentence = clean && !/[A-Za-z]/.test(clean) && clean.length > 24;
       if (clean && !isSentence) span.dataset.word = clean;
       else span.classList.add('ll-punct');

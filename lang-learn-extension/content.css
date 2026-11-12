@@ -254,6 +254,10 @@
 }
 .ll-text .ll-word:hover { background: #fff3bf; }
 .ll-text .ll-word.ll-saved { background: #d3f9d8; }
+/* 中/日/韩按词切分后词间没有空格，去掉英文词那 1~2px padding，免得中文被撑出人为字距。
+   单独列小窗模式那条，是因为它的选择器优先级更高。 */
+.ll-text .ll-word.ll-cjk, #ll-live .ll-word.ll-cjk,
+#ll-panel.ll-windowed #ll-live .ll-word.ll-cjk { padding: 0; }
 
 #ll-status { padding: 0 10px 4px; color: #e8590c; font-size: 12px; line-height: 1.4; flex: 0 0 auto; }
 

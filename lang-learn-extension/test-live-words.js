@@ -33,6 +33,13 @@ function sliceFn(source, name) {
 
 const fnWrapWords = sliceFn(src, 'wrapWords');
 const fnUpdateLive = sliceFn(src, 'updateLive');
+// wrapWords 现在依赖 word-segmentation 段里的真实分词函数（Intl.Segmenter / 降级按字切）
+const fnWordSeg = (function () {
+  const A = '// >>> word-segmentation', B = '// <<< word-segmentation';
+  const a = src.indexOf(A), b = src.indexOf(B);
+  if (a < 0 || b < 0 || b <= a) throw new Error('找不到 word-segmentation 代码段');
+  return src.slice(src.indexOf('\n', a) + 1, b);
+})();
 
 // updateLive 现在用 cueForSpan / cueAtStart 决定「第二行挂哪一条」。
 // 同样从 content.js 的 dual-line-helpers 段抽真实源码，避免测复制品。
@@ -85,7 +92,8 @@ const documentStub = {
   createDocumentFragment: () => makeNode('#fragment')
 };
 
-const sandbox = { console, document: documentStub, Promise, Math, Date, JSON, RegExp };
+// 显式注入 Intl：真实浏览器里由宿主提供，测试里也要让被测代码走同一条 ICU 分词路径
+const sandbox = { console, document: documentStub, Promise, Math, Date, JSON, RegExp, Intl, Array, String, Set, Map };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
@@ -99,7 +107,7 @@ vm.runInContext(`
   }
   function currentCursorCue() { return cursorCueFrom(cues); }
 `, sandbox);
-vm.runInContext(fnWrapWords, sandbox);
+vm.runInContext(fnWordSeg + '\n' + fnWrapWords, sandbox);
 vm.runInContext(fnDualHelpers, sandbox);
 vm.runInContext(fnUpdateLive, sandbox);
 
@@ -183,9 +191,10 @@ const mainB = find(liveEl, 'll-live-main');
 const sub = find(liveEl, 'll-live-sub');
 check('双语：主行 .ll-live-main 仍在', !!mainB);
 check('双语：对照行 .ll-live-sub 存在', !!sub);
-// 英文按空格切词；中文等无空格语言整句即一个 span（与列表行为一致，不做分词）
+// 英文按空格切词；中文等无空格语言由 Intl.Segmenter 按词切（v1.0.17 起不再整句一个 span）
 check('双语：主行逐词可点', wordsIn(mainB).length === 4, JSON.stringify(wordsIn(mainB)));
-check('双语：对照行也是可点 span', wordsIn(sub).length >= 1, JSON.stringify(wordsIn(sub)));
+check('双语：中文对照行按词切成多个可点 span', wordsIn(sub).length >= 3, JSON.stringify(wordsIn(sub)));
+check('双语：中文词本身可点（不再拿整句查词）', wordsIn(sub).indexOf('谢谢') >= 0, JSON.stringify(wordsIn(sub)));
 
 function liveKeyReset() { vm.runInContext('liveKey = "";', sandbox); }
 

@@ -4,7 +4,7 @@
 > 把 **B 站 / YouTube** 视频变成学习材料：逐句字幕列表、跟读录音评分、点词查词、生词本、间隔重复复习、AI 字幕翻译。
 > All data stays in your browser (`chrome.storage.local`) — **no login, no account, nothing uploaded**. 数据全在本地，**无需登录、无账号、不上传**。
 
-**Version v1.0.16** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
+**Version v1.0.17** · MV3 · Chrome / Edge / Quark / Kiwi · MIT License
 
 [![Get LingoReel for Chrome](https://img.shields.io/badge/Chrome_Web_Store-Download-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/lingoreel/jghdcidakakmfacgnpmiepeplfgljbmc)
 [![Get LingoReel for Edge](https://img.shields.io/badge/Microsoft_Edge-Download-0078D4?logo=microsoftedge&logoColor=white)](https://microsoftedge.microsoft.com/addons/detail/lingoreel/jfdkckgipihhiebhcgembhpmdoeediio)
@@ -28,7 +28,7 @@ The hard part of learning from foreign-language videos isn't *seeing* subtitles 
 - **Use YouTube's own translation (new in 1.0.14)** — on YouTube, when the current CC track exposes YouTube's **official translated captions**, the compact **"YT译"** button fetches that official translation (caption `baseUrl` + `&tlang=<native language>`) and adds it as a **"（YouTube 翻译）"** track, auto-assigned as the compare track — so the floating window shows **the original and YouTube's own translation on two lines**. It's free and instant, needs no LLM key, and is fully independent of the AI translation below: if a video doesn't expose translation (or the `timedtext` token check fails), it says so and you can fall back to the "翻译" button.
 - **Three interchangeable translation engines** — **LLM API** (DeepSeek / SiliconFlow / Zhipu GLM / Moonshot / Qwen / OpenAI…, best quality, bring your own key) → **free Google endpoint** → **MyMemory** (usually reachable from mainland China). Default "auto" relays through them in order: if the LLM gets rate-limited halfway, the free engines fill the remaining lines so the track never has gaps.
 - **Progressive translation** — a 200+ line video no longer sits blank for a minute. Lines are translated in **batches (the first batch is only 8 lines, so results show up almost immediately; 20 lines after that)**, and **after every batch the partial result is written into the translation track and re-rendered**, so translated lines keep flowing into the floating window. The status bar shows "N/M lines · K on screen", and hitting **Stop** keeps whatever has already been translated. Results are only **cached when essentially complete**.
-- **Live subtitle row** — shows the current line, and every word in it is **clickable**.
+- **Live subtitle row** — shows the current line, and every word in it is **clickable** — including Chinese / Japanese / Korean, which are word-segmented with the browser's built-in ICU dictionary (v1.0.17), not taken as one whole sentence.
 - **Shadowing score (🎤)** — click 🎤 to record your read-aloud of that line through the **microphone** (mic audio only, not the tab), click ■ to stop. The browser's **speech recognition** transcribes what you said and we score **word-level similarity** against the original line (green ≥80 / amber ≥60 / red <60), with **replay your take / the original** and re-record. Available both on list rows and on the floating window's live row.
 
 ### Bilibili CC scan (new in 1.0.2+)
@@ -99,7 +99,7 @@ The hard part of learning from foreign-language videos isn't *seeing* subtitles 
 - **Browser AI live captions** (e.g. Quark) render in a private UI layer, not in the page DOM, so they can't be read.
 - **Bilibili subtitles require login**; without it the API may return empty.
 - **Binary dictionaries** (Eudic MDX / StarDict) can't be parsed inside the extension — convert to plain text first.
-- **Space-less languages like Japanese**: a whole sentence becomes one clickable unit (and online dictionaries are weak for Japanese — use a local Eudic dictionary).
+- **Space-less languages (Chinese / Japanese / Korean)**: since v1.0.17 they are word-segmented with the browser's ICU dictionary, but proper nouns / slang may still be split into single characters, and online dictionaries remain weak for Japanese — a local Eudic dictionary gives the best coverage.
 - **Free translation endpoints have quotas**: Google may rate-limit (429) and MyMemory's anonymous quota is a few thousand chars/day; very long videos may translate only part — click "译 [native]" again later to continue. Translations are machine output; don't treat them as ground truth.
 - **Over-long videos translate the first 1500 lines only**: beyond that the free endpoints hard-fail; better to get the first half done.
 - **Custom LLM domains need one authorization**: DeepSeek / SiliconFlow / Zhipu / Kimi / Qwen / Volc / OpenAI / Groq are built into `host_permissions` (no auth needed); a relay/proxy outside that list will prompt once for authorization when you click "Test connection".
@@ -131,13 +131,14 @@ lang-learn-extension/
 |---|---|
 | `test-parse.js` | Dictionary parsing (GBK decoding, POS segmentation, misalignment, `<br>` cleanup) |
 | `test-lemma.js` | Lemmatization (irregular table, suffix rules, consonant doubling, irregular plurals) |
-| `test-live-words.js` | Floating-window live row word-clickability + no per-frame DOM rebuild |
+| `test-live-words.js` | Floating-window live row word-clickability (incl. CJK words) + no per-frame DOM rebuild |
 | `test-vocab-smoke.js` | Standalone notebook init & render |
 | `test-yt.js` | YouTube response brace-matching extraction, track parsing |
 | `test-yt-fmt.js` | YouTube subtitle body parsing for JSON3 / VTT / XML |
 | `test-yt-bridge.js` | MAIN-world bridge: track forwarding, videoId validation, handshake resend, request interception |
 | `test-yt-official.js` | YouTube official translation: target→`tlang` mapping (`zh-CN`→`zh-Hans`), `translationLanguages` availability, `baseUrl + &tlang=` URL building (keeps `pot`, dedupes `tlang`), plus dual-line resolution (`cueForSpan` span matching / merge / dedupe, `cueAtStart` strict start matching) (36 assertions) |
 | `test-target-switch.js` | Changing the native language: old virtual tracks + cached bodies dropped, selectors remapped to real source track, in-flight old-language translation aborted, auto re-translate into the new language (27 assertions) |
+| `test-cjk-words.js` | CJK word segmentation: `Intl.Segmenter` word splits for Chinese / Japanese / Korean, punctuation not looked up, English splitting unchanged, >24-char CJK no longer blocked as a sentence, no-API fallback to per-character clicking (39 assertions) |
 | `test-css-structure.js` | CSS structural audit (brace balance, dangling commas, empty rules) |
 | `test-sticky-cue.js` | Cue boundary: while paused on `prev.to == next.from` the just-heard line stays locked (▶ and 🎤 must target the same line) |
 | `test-autopause.js` | Auto-pause state machine: arms once, pauses at line end, survives "rolling" ASR captions, refuses expired targets, seek guard, clamps stop to next line's start; panel toggle stays a per-page override and never writes back the global default (42 assertions) |
@@ -173,6 +174,8 @@ npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test
 ```
 
 ## Version highlights (selected)
+
+- **v1.0.17** **Chinese / Japanese / Korean subtitles are now word-clickable.** Previously `wrapWords` split on whitespace, so a space-less line became **one single "word"** — clicking it sent the whole sentence to the dictionary, and any pure-CJK line longer than 24 characters was suppressed entirely (not clickable at all). Now lines containing CJK characters are segmented with the browser's built-in **`Intl.Segmenter`** (ICU dictionary: no new dependency, no network, no API key): 「我很好，谢谢。」→ 我 / 很好 / 谢谢, 「今日はいい天気ですね。」→ 今日 / は / いい / 天気 / です / ね; Korean and mixed Chinese/English lines work too. Punctuation is never looked up, English splitting is unchanged (`I'm` keeps its apostrophe), and on older kernels without `Intl.Segmenter` it degrades to **per-character** clicking rather than a whole sentence. CJK lines also drop the 1–2px per-word padding (`.ll-cjk`) so no artificial letter-spacing is introduced. Regression locked by `test-cjk-words.js` (39 assertions) plus extra cases in `test-live-words.js`.
 
 - **v1.0.16** **Switching your native language now switches the translation target — cleanly.** "Native language" *is* the translation target (one setting drives AI translation, the YouTube `tlang` mapping, and the word-lookup language), and it takes effect immediately without a page reload. What used to lag behind: translation tracks generated for the **old** language stayed on the panel, so you'd end up with a track named in the new language but filled with the old one, and the compare line kept showing the previous language. Now, when the native language changes, the plugin **aborts any in-flight translation for the old language, drops all virtual translation tracks and their cached bodies, points the selectors back at the real source track**, and — if auto-translate is on — **re-translates into the new language automatically**; if it's off, it tells you to hit "翻译 / YT译". Translation cache is keyed per target language, so switching back to a language you used before is instant (served from cache). Regression locked by `test-target-switch.js` (27 assertions).
 
@@ -223,7 +226,7 @@ Released under the [MIT License](LICENSE).
 - **用 YouTube 官方翻译（1.0.14 新增）**：YouTube 上若当前 CC 轨道开放了**官方翻译**，点面板上紧凑的「YT译」按钮，就直接调 YouTube 官方接口（字幕 `baseUrl` + `&tlang=<母语>`）取回官方译好的字幕，生成一条「（YouTube 翻译）」轨道并自动挂到「对照」位——浮窗里就是**原文 + YouTube 官方译文两行**。免费、即时、不用大模型 Key，与本页下面的 AI 翻译完全独立；若该视频没开放翻译（或 timedtext 令牌校验失败），会明确提示，可退回点「翻译」按钮走 AI。
 - **翻译引擎三选一**：**大模型 API**（DeepSeek / 硅基流动 / 智谱 / Kimi / 通义 / OpenAI…，质量最好）→ **Google 免费端点** → **MyMemory**（国内通常可达）。默认「自动」按这个顺序接力：大模型限流只译出一半时，剩下的自动由免费接口补上，轨道不会缺行。
 - **译文边翻边上屏（渐进式）**：200 多行的长视频不再"点完等一分多钟什么都看不到"——插件按块翻译（首块只有 8 行，几乎立刻出结果；之后每块 20 行），每译完一块就把已有译文写进译文轨道并刷新，译文一行行往外冒。状态栏实时显示「已翻 N/M 行 · 已上屏 K 行」，中途点「停止」会保留已经翻好的部分，且只在基本翻全时才写缓存。
-- **实时字幕行**：显示当前时间点对应的字幕，**逐词可点**。
+- **实时字幕行**：显示当前时间点对应的字幕，**逐词可点**——中文 / 日文 / 韩文自 v1.0.17 起也用浏览器内置 ICU 词典按词切分，不再是整句一个词。
 - **跟读录音打分（🎤）**：点 🎤 用麦克风录下你跟读这一句（**只录人声，不录视频声**），点 ■ 停止；浏览器语音识别把你的话转成文字，给**逐词相似度**基础分（绿≥80 / 橙≥60 / 红<60），可回放「我的录音 / 原句」再读一遍。列表行和窗口化小窗的实时行都能用。
 
 ### B 站 CC 字幕扫描（1.0.2+ 新增）
@@ -323,7 +326,7 @@ Released under the [MIT License](LICENSE).
 - **浏览器 AI 实时字幕抓不到**：夸克等浏览器的 AI 听译渲染在私有 UI 层、不在网页 DOM 内，扩展无从读取。
 - **B 站字幕依赖登录态**：未登录可能返回空或报错。
 - **二进制词典不支持**：欧路 MDX / StarDict 等二进制格式无法在扩展内解析，需先转成纯文本。
-- **日语等无空格语言**：整句会是一个可点单元（在线词典的日语支持也较弱，可走欧路本地词库）。
+- **中/日/韩等无空格语言**：v1.0.17 起已用浏览器内置 ICU 词典按词切分，但人名、网络新词仍可能切成单字；在线词典的日语支持也较弱，可走欧路本地词库。
 - **免费翻译接口有额度**：Google 端点随时可能限流（429），MyMemory 匿名额度约每日数千字符；长视频可能只翻译出一部分，隔一会再点「译 [母语]」可继续。译文是机器翻译，别当标准答案。
 - **超长视频只译前 1500 行**：再长会让免费接口直接限流到全线失败，宁可先给前半段。
 - **自定义大模型域名要授权一次**：DeepSeek / 硅基流动 / 智谱 / Kimi / 通义 / 火山 / OpenAI / Groq 已内置在 `host_permissions` 里，**直接用不用授权**；填了列表外的中转站域名时，点「测试连接」会弹一次授权请求，允许后后台才能发出去。
@@ -355,13 +358,14 @@ lang-learn-extension/
 |---|---|
 | `test-parse.js` | 词典文件解析（GBK 解码、词性分段、错位、`<br>` 清洗） |
 | `test-lemma.js` | 词形还原（不规则表、规则词缀、辅音双写、不规则复数） |
-| `test-live-words.js` | 浮窗实时字幕逐词可点 + 防每帧重建 DOM |
+| `test-live-words.js` | 浮窗实时字幕逐词可点（含中/日/韩按词切）+ 防每帧重建 DOM |
 | `test-vocab-smoke.js` | 独立生词本页初始化与渲染 |
 | `test-yt.js` | YouTube 响应括号配对提取、轨道解析 |
 | `test-yt-fmt.js` | YouTube 字幕正文三格式（JSON3 / VTT / XML）解析 |
 | `test-yt-bridge.js` | 主世界桥接：轨道转发、videoId 校验、握手重发、请求截获 |
 | `test-yt-official.js` | YouTube 官方翻译：目标语言→`tlang` 映射（`zh-CN`→`zh-Hans`）、`translationLanguages` 可用性判定、`baseUrl + &tlang=` 拼（保留 `pot`、去重 `tlang`），以及双语第二行取行（`cueForSpan` 区间取/合并/去重、`cueAtStart` 严格起点匹配）（36 断言） |
 | `test-target-switch.js` | 切换母语：清掉旧语言的虚拟译文轨道与正文缓存、下拉指针重映射回真实源轨道、作废在飞的旧语言翻译、按新母语自动重译（27 断言） |
+| `test-cjk-words.js` | 中/日/韩分词：`Intl.Segmenter` 按词切、标点不挂查词、英文切分行为不变、超 24 字中文不再被整句屏蔽、无 API 时降级按字切（39 断言） |
 | `test-css-structure.js` | CSS 结构体检（括号配平、悬挂逗号、空规则） |
 | `test-sticky-cue.js` | 句边界锁行：暂停在「上一句 to == 下一句 from」上时，刚听完的那句保持锁定（▶ 与 🎤 必须指向同一句） |
 | `test-autopause.js` | 自动暂停状态机：目标只武装一次、播到句尾停住、能扛住"滚动式 ASR 字幕"、拒绝过期目标、seek 保护期、停止点收紧到下一句起点；面板开关为本页临时覆盖、不回写全局默认（42 断言） |
@@ -397,6 +401,8 @@ npm i jsdom && node test-translate-flow.js && node test-llm-dict.js && node test
 ```
 
 ## 主要版本历程（节选）
+
+- **v1.0.17** **中文 / 日文 / 韩文字幕现在也能逐词点取。** 以前 `wrapWords` 按空白切词，无空格的一整句就是**一个「词」**——点一下等于拿整句话去查词典；纯中/日/韩超过 24 字还会被整句屏蔽、完全点不动。现在含 CJK 的行改用浏览器内置 **`Intl.Segmenter`**（ICU 词典，不引新依赖、不联网、不用 API Key）按词切：「我很好，谢谢。」→ 我 / 很好 / 谢谢，「今日はいい天気ですね。」→ 今日 / は / いい / 天気 / です / ね，韩文与中英混排同样生效。标点不挂查词，英文的空白切分与撇号（`I'm`）行为不变；老内核没有该 API 时降级成**按字切**，至少每个字能单独点，而不是整句。含 CJK 的行还会去掉英文词那 1~2px padding（`.ll-cjk`），避免中文被撑出人为字距。回归锁 `test-cjk-words.js`（39 断言）+ `test-live-words.js` 补充用例。
 
 - **v1.0.16** **换母语 = 换翻译目标，而且会干净地跟着换。** 「母语」就是译文目标语言（同一个设置同时驱动 AI 翻译的目标语言、YouTube `tlang` 映射、点词释义的语言），改完即时生效、不用刷新页面。以前跟不上的地方：为**旧语言**生成的译文轨道会留在面板上，于是出现「轨道名是新语言、正文还是旧语言」，对照位也一直挂着旧语言译文。现在改母语会**作废在飞的旧语言翻译、清掉所有虚拟译文轨道与其正文缓存、把下拉指针退回真实源轨道**；**自动翻译开着就按新母语自动重译**，关着则提示手动点「翻译 / YT译」。译文缓存按目标语言分键，所以切回用过的语言是秒出（直接命中缓存）。回归锁 `test-target-switch.js`（27 断言）。
 
